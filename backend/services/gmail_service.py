@@ -182,6 +182,10 @@ class GmailService:
             # 获取标签
             labels = message.get('labelIds', [])
             
+            # 根据UNREAD标签确定状态
+            # 如果包含UNREAD标签，则为未读；否则为已读
+            status = 'unread' if 'UNREAD' in labels else 'read'
+            
             # 获取线程ID
             thread_id = message.get('threadId', '')
             
@@ -196,6 +200,7 @@ class GmailService:
                 "provider_message_id": message_id,
                 "thread_id": thread_id,
                 "labels": labels,
+                "status": status,  # 添加状态字段
                 "received_at": received_at or parsed.get("received_at")
             }
         except HttpError as e:
@@ -338,9 +343,84 @@ class GmailService:
         """标记为已读"""
         return self.modify_message(message_id, remove_labels=['UNREAD'])
     
+    def mark_as_unread(self, message_id: str) -> bool:
+        """标记为未读"""
+        return self.modify_message(message_id, add_labels=['UNREAD'])
+    
     def mark_as_important(self, message_id: str) -> bool:
         """标记为重要"""
         return self.modify_message(message_id, add_labels=['IMPORTANT'])
+    
+    def check_message_exists(self, message_id: str) -> bool:
+        """检查邮件是否在Gmail中存在
+        
+        Args:
+            message_id: Gmail消息ID
+            
+        Returns:
+            如果存在返回True，如果不存在（已删除）返回False
+        """
+        if not self.service:
+            if not self.refresh_token():
+                return False
+        
+        try:
+            # 只获取metadata，不获取完整邮件内容，提高性能
+            self.service.users().messages().get(
+                userId='me',
+                id=message_id,
+                format='metadata',
+                metadataHeaders=[]
+            ).execute()
+            return True
+        except HttpError as e:
+            if e.resp.status == 404:
+                # 邮件不存在（已删除）
+                return False
+            elif e.resp.status == 401:
+                # Token过期，尝试刷新
+                if self.refresh_token():
+                    return self.check_message_exists(message_id)
+            log.error(f"检查Gmail邮件是否存在失败: {e}")
+            return False
+    
+    def get_message_status(self, message_id: str) -> Optional[str]:
+        """获取邮件的已读/未读状态（只获取metadata，不获取完整内容）
+        
+        Args:
+            message_id: Gmail消息ID
+            
+        Returns:
+            'read' 或 'unread'，如果失败或邮件不存在返回None
+        """
+        if not self.service:
+            if not self.refresh_token():
+                return None
+        
+        try:
+            # 只获取metadata，不获取完整邮件内容，提高性能
+            message = self.service.users().messages().get(
+                userId='me',
+                id=message_id,
+                format='metadata',
+                metadataHeaders=[]  # 不需要metadata headers，只需要labelIds
+            ).execute()
+            
+            labels = message.get('labelIds', [])
+            # 如果包含UNREAD标签，则为未读
+            if 'UNREAD' in labels:
+                return 'unread'
+            else:
+                return 'read'
+        except HttpError as e:
+            if e.resp.status == 404:
+                # 邮件不存在（已删除）
+                return None
+            log.error(f"获取Gmail邮件状态失败: {e}")
+            if e.resp.status == 401:
+                if self.refresh_token():
+                    return self.get_message_status(message_id)
+            return None
     
     def delete_message(self, message_id: str) -> bool:
         """删除邮件
@@ -368,6 +448,15 @@ class GmailService:
                 # Token过期，尝试刷新
                 if self.refresh_token():
                     return self.delete_message(message_id)
+            elif e.resp.status == 403:
+                # 权限不足
+                error_details = str(e)
+                if 'insufficientPermissions' in error_details or 'Insufficient Permission' in error_details:
+                    log.error(f"Gmail账户 {self.account.email} 缺少删除邮件的权限。需要重新授权以获取 gmail.modify 权限。")
+                    raise Exception("权限不足：需要重新授权Gmail账户以获取删除邮件的权限。请断开连接后重新连接。")
+                else:
+                    log.error(f"Gmail API权限错误: {e}")
+                    raise Exception(f"Gmail API权限错误: {str(e)}")
             elif e.resp.status == 429:
                 # 限流错误
                 log.warning(f"Gmail API限流，邮件 {message_id} 删除失败")

@@ -1,6 +1,6 @@
 """SQLAlchemy数据库模型"""
 from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, JSON, Enum as SQLEnum
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, backref
 from sqlalchemy.sql import func
 from datetime import datetime
 import enum
@@ -177,6 +177,7 @@ class EmailEmbedding(Base):
     meta_data = Column("metadata", JSON)  # 元数据（邮件摘要、关键词等），数据库列名仍为metadata
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    # 关系
-    email = relationship("Email", backref="embedding")
+    # 关系（一对一关系：一个邮件对应一个嵌入记录）
+    # 注意：cascade 在 backref 中设置，使用 single_parent=True 允许 delete-orphan
+    email = relationship("Email", backref=backref("embedding", uselist=False, cascade="all, delete-orphan", single_parent=True))
 

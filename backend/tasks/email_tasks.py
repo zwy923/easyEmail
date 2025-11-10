@@ -53,17 +53,78 @@ def fetch_emails_from_account(self, account_id: int):
         total_messages = len(messages)
         log.info(f"账户 {account_id} 从Gmail获取到 {total_messages} 封邮件，开始处理...")
         
+        # 更新任务状态：开始处理
+        self.update_state(
+            state='PROGRESS',
+            meta={
+                'current': 0,
+                'total': total_messages,
+                'percent': 0,
+                'new_count': 0,
+                'skipped_count': 0,
+                'error_count': 0,
+                'status': '开始处理...'
+            }
+        )
+        
         for idx, msg in enumerate(messages, 1):
-            # 每处理50封邮件记录一次进度
-            if idx % 50 == 0:
-                log.info(f"处理进度: {idx}/{total_messages} ({idx*100//total_messages}%), 新增: {new_count}, 跳过: {skipped_count}, 错误: {error_count}")
+            # 每处理10封邮件更新一次进度（更频繁的更新）
+            if idx % 10 == 0 or idx == total_messages:
+                percent = idx * 100 // total_messages
+                self.update_state(
+                    state='PROGRESS',
+                    meta={
+                        'current': idx,
+                        'total': total_messages,
+                        'percent': percent,
+                        'new_count': new_count,
+                        'skipped_count': skipped_count,
+                        'error_count': error_count,
+                        'status': f'处理中: {idx}/{total_messages} ({percent}%)'
+                    }
+                )
+                log.info(f"处理进度: {idx}/{total_messages} ({percent}%), 新增: {new_count}, 跳过: {skipped_count}, 错误: {error_count}")
             
             message_id = msg.get("id")
             
             # 检查邮件是否已存在
             existing = crud.get_email_by_provider_id(db, message_id)
             if existing:
+                # 同步已存在邮件的状态（从Gmail获取最新状态）
+                # 注意：使用get_message_status只获取metadata，不获取完整邮件内容，以提高性能
+                try:
+                    # 首先检查邮件是否还存在（可能已在Gmail中删除）
+                    exists = service.check_message_exists(message_id)
+                    if not exists:
+                        # 邮件在Gmail中已删除，标记为已删除
+                        from backend.db.models import EmailStatus
+                        if existing.status != EmailStatus.DELETED:
+                            crud.update_email(db, existing.id, status=EmailStatus.DELETED)
+                            log.info(f"邮件 {existing.id} (message_id: {message_id}) 在Gmail中已删除，已标记为DELETED")
+                        skipped_count += 1
+                        continue
+                    
+                    # 邮件存在，同步状态
+                    gmail_status = service.get_message_status(message_id)
+                    if gmail_status:
+                        # 将Gmail状态转换为数据库状态
+                        from backend.db.models import EmailStatus
+                        if gmail_status == 'unread':
+                            db_status = EmailStatus.UNREAD
+                        else:
+                            db_status = EmailStatus.READ
+                        
+                        # 如果状态不一致，更新数据库
+                        if existing.status != db_status:
+                            crud.update_email(db, existing.id, status=db_status)
+                            log.debug(f"同步邮件 {existing.id} (message_id: {message_id}) 状态: {existing.status.value} -> {db_status.value}")
+                except Exception as e:
+                    log.warning(f"同步邮件 {existing.id} (message_id: {message_id}) 状态失败: {e}")
+                
                 skipped_count += 1
+                # 只在每50封邮件时记录一次跳过信息，避免日志过多
+                if skipped_count % 50 == 0:
+                    log.debug(f"已跳过 {skipped_count} 封已存在的邮件")
                 continue
             
             # 获取邮件详情
@@ -80,6 +141,15 @@ def fetch_emails_from_account(self, account_id: int):
             
             # 创建邮件记录
             from backend.db.schemas import EmailCreate
+            from backend.db.models import EmailStatus
+            
+            # 根据Gmail返回的状态设置数据库状态
+            gmail_status = email_data.get("status", "unread")
+            if gmail_status == "unread":
+                db_status = EmailStatus.UNREAD
+            else:
+                db_status = EmailStatus.READ
+            
             email_create = EmailCreate(
                 account_id=account_id,
                 provider_message_id=message_id,
@@ -93,7 +163,8 @@ def fetch_emails_from_account(self, account_id: int):
                 body_text=email_data.get("body_text"),
                 body_html=email_data.get("body_html"),
                 received_at=email_data.get("received_at") or datetime.utcnow(),
-                labels=email_data.get("labels", [])
+                labels=email_data.get("labels", []),
+                status=db_status  # 使用从Gmail同步的状态
             )
             
             email = crud.create_email(db, email_create)
@@ -103,14 +174,32 @@ def fetch_emails_from_account(self, account_id: int):
             try:
                 from backend.services.vector_store import VectorStoreService
                 vector_store = VectorStoreService()
-                vector_store.add_email(email)
+                success = vector_store.add_email(email)
+                if not success:
+                    log.warning(f"添加邮件 {email.id} 到向量存储失败（返回False）")
             except Exception as e:
-                log.warning(f"添加邮件到向量存储失败: {e}")
+                log.warning(f"添加邮件 {email.id} 到向量存储失败: {e}", exc_info=True)
             
-            # 异步处理邮件（分类和规则）
-            process_email.delay(email.id)
+            # 不再自动分类，只有用户手动点击分类按钮时才会分类
         
         log.info(f"账户 {account_id} 处理完成: 总计 {total_messages} 封，新增 {new_count} 封，跳过 {skipped_count} 封，错误 {error_count} 封")
+        if new_count == 0 and skipped_count > 0:
+            log.info(f"提示: 所有邮件都已存在于数据库中，没有新邮件。如需重新处理，请考虑清理数据库或等待新邮件。")
+        
+        # 更新任务状态：完成
+        self.update_state(
+            state='SUCCESS',
+            meta={
+                'current': total_messages,
+                'total': total_messages,
+                'percent': 100,
+                'new_count': new_count,
+                'skipped_count': skipped_count,
+                'error_count': error_count,
+                'status': '处理完成'
+            }
+        )
+        
         return {
             "success": True, 
             "total_messages": total_messages,
@@ -162,21 +251,45 @@ def process_email(self, email_id: int, force_classify: bool = False):
         
         # 记录日志
         try:
+            # 确保details是可序列化的字典
+            log_details = {}
+            if isinstance(results, dict):
+                for k, v in results.items():
+                    # 只序列化基本类型，避免复杂对象
+                    if isinstance(v, (str, int, float, bool, type(None))):
+                        log_details[k] = v
+                    elif isinstance(v, list):
+                        log_details[k] = str(v)[:200]  # 限制长度
+                    else:
+                        log_details[k] = str(v)[:200]  # 转换为字符串并限制长度
+            
             crud.create_log(
                 db,
                 level="INFO",
                 message=f"处理邮件 {email_id}",
                 module="email_tasks",
                 action="process_email",
-                details=results
+                details=log_details if log_details else None
             )
         except Exception as log_error:
-            log.warning(f"记录日志失败: {log_error}")
+            log.warning(f"记录日志失败: {log_error}", exc_info=True)
         
         return {"success": True, **results}
         
     except Exception as e:
         log.error(f"处理邮件失败: {e}", exc_info=True)
+        # 尝试记录错误日志，但不让日志记录失败影响主流程
+        try:
+            crud.create_log(
+                db,
+                level="ERROR",
+                message=f"处理邮件 {email_id} 失败: {str(e)[:500]}",
+                module="email_tasks",
+                action="process_email",
+                details={"error": str(e)[:500]}
+            )
+        except:
+            pass  # 忽略日志记录错误
         return {"success": False, "message": str(e)}
 
 
@@ -231,6 +344,125 @@ def generate_draft(self, email_id: int, tone: str = "professional", length: str 
 
 
 @celery_app.task(base=DatabaseTask, bind=True)
+def sync_email_status(self, account_id: int):
+    """同步账户中所有邮件的已读/未读状态和删除状态（从Gmail同步到数据库）
+    
+    Args:
+        account_id: 邮箱账户ID
+    """
+    db = self.db
+    try:
+        account = crud.get_email_account(db, account_id)
+        if not account or not account.is_active:
+            log.warning(f"邮箱账户 {account_id} 不存在或未激活")
+            return {"success": False, "message": "账户不存在或未激活"}
+        
+        if account.provider != models.EmailProvider.GMAIL:
+            return {"success": False, "message": "目前仅支持Gmail"}
+        
+        service = GmailService(account)
+        
+        # 获取账户的所有邮件
+        emails = db.query(models.Email).filter(
+            models.Email.account_id == account_id
+        ).all()
+        
+        total_emails = len(emails)
+        synced_count = 0
+        updated_count = 0
+        deleted_count = 0
+        
+        # 更新任务状态：开始处理
+        self.update_state(
+            state='PROGRESS',
+            meta={
+                'current': 0,
+                'total': total_emails,
+                'percent': 0,
+                'synced_count': 0,
+                'updated_count': 0,
+                'deleted_count': 0,
+                'status': '开始同步状态...'
+            }
+        )
+        
+        for idx, email in enumerate(emails, 1):
+            try:
+                # 首先检查邮件是否还存在
+                exists = service.check_message_exists(email.provider_message_id)
+                if not exists:
+                    # 邮件在Gmail中已删除，标记为已删除
+                    from backend.db.models import EmailStatus
+                    if email.status != EmailStatus.DELETED:
+                        crud.update_email(db, email.id, status=EmailStatus.DELETED)
+                        deleted_count += 1
+                        log.info(f"邮件 {email.id} 在Gmail中已删除，已标记为DELETED")
+                    synced_count += 1
+                    continue
+                
+                # 邮件存在，同步状态
+                gmail_status = service.get_message_status(email.provider_message_id)
+                if gmail_status:
+                    from backend.db.models import EmailStatus
+                    if gmail_status == 'unread':
+                        db_status = EmailStatus.UNREAD
+                    else:
+                        db_status = EmailStatus.READ
+                    
+                    # 如果状态不一致，更新数据库
+                    if email.status != db_status:
+                        crud.update_email(db, email.id, status=db_status)
+                        updated_count += 1
+                    
+                    synced_count += 1
+                    
+                    # 每处理20封邮件更新一次进度
+                    if idx % 20 == 0 or idx == total_emails:
+                        percent = idx * 100 // total_emails if total_emails > 0 else 100
+                        self.update_state(
+                            state='PROGRESS',
+                            meta={
+                                'current': idx,
+                                'total': total_emails,
+                                'percent': percent,
+                                'synced_count': synced_count,
+                                'updated_count': updated_count,
+                                'deleted_count': deleted_count,
+                                'status': f'同步中: {idx}/{total_emails} ({percent}%)'
+                            }
+                        )
+            except Exception as e:
+                log.warning(f"同步邮件 {email.id} 状态失败: {e}")
+        
+        log.info(f"账户 {account_id} 状态同步完成: 检查 {synced_count} 封，更新 {updated_count} 封，删除 {deleted_count} 封")
+        
+        # 更新任务状态：完成
+        self.update_state(
+            state='SUCCESS',
+            meta={
+                'current': total_emails,
+                'total': total_emails,
+                'percent': 100,
+                'synced_count': synced_count,
+                'updated_count': updated_count,
+                'deleted_count': deleted_count,
+                'status': '同步完成'
+            }
+        )
+        
+        return {
+            "success": True,
+            "synced_count": synced_count,
+            "updated_count": updated_count,
+            "deleted_count": deleted_count
+        }
+        
+    except Exception as e:
+        log.error(f"同步邮件状态失败: {e}", exc_info=True)
+        return {"success": False, "message": str(e)}
+
+
+@celery_app.task(base=DatabaseTask, bind=True)
 def check_all_accounts(self):
     """检查所有活跃账户的新邮件"""
     db = self.db
@@ -276,23 +508,37 @@ def delete_email(self, email_id: int):
                 if not success:
                     return {"success": False, "message": "Gmail删除失败"}
             except Exception as e:
+                error_msg = str(e)
                 log.error(f"删除Gmail邮件失败: {e}")
+                # 如果是权限错误，返回更友好的提示
+                if "权限不足" in error_msg or "insufficientPermissions" in error_msg or "Insufficient Permission" in error_msg:
+                    return {
+                        "success": False, 
+                        "message": "权限不足：需要重新授权Gmail账户以获取删除邮件的权限。请在前端断开连接后重新连接。",
+                        "requires_reauth": True
+                    }
                 return {"success": False, "message": str(e)}
         else:
             log.warning(f"不支持的邮箱提供商: {account.provider}")
             return {"success": False, "message": "不支持的邮箱提供商"}
         
-        # 从向量存储删除
+        # 保存邮件ID用于后续清理
+        provider_message_id = email.provider_message_id
+        
+        # 1. 先从向量存储删除（必须在数据库删除之前，避免检索到已删除的邮件）
         try:
             from backend.services.vector_store import VectorStoreService
             vector_store = VectorStoreService()
             vector_store.delete_email(email_id)
+            log.info(f"邮件 {email_id} 已从向量存储删除")
         except Exception as e:
             log.warning(f"从向量存储删除邮件失败: {e}")
+            # 继续执行，不因为向量删除失败而阻止整个删除流程
         
-        # 从数据库删除（级联删除会处理相关数据）
+        # 2. 从数据库删除（级联删除会处理相关数据：drafts, email_embeddings等）
         db.delete(email)
         db.commit()
+        log.info(f"邮件 {email_id} 已从数据库删除")
         
         log.info(f"邮件 {email_id} 删除成功")
         return {"success": True, "email_id": email_id}

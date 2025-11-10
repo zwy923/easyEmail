@@ -256,6 +256,158 @@ async def fetch_emails(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/sync-status")
+async def sync_email_status(
+    request: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    """同步邮件的已读/未读状态（从Gmail同步到数据库）"""
+    account_id = request.get("account_id")
+    if not account_id:
+        raise HTTPException(status_code=400, detail="缺少account_id参数")
+    
+    account = crud.get_email_account(db, int(account_id))
+    if not account:
+        raise HTTPException(status_code=404, detail="邮箱账户不存在")
+    
+    if not account.is_active:
+        raise HTTPException(status_code=400, detail="邮箱账户未激活")
+    
+    try:
+        from backend.tasks.email_tasks import sync_email_status as sync_status_task
+        result = sync_status_task.delay(account_id)
+        return {
+            "success": True,
+            "task_id": result.id,
+            "message": "状态同步任务已提交"
+        }
+    except Exception as e:
+        log.error(f"触发状态同步任务失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/task/{task_id}")
+async def get_task_status(task_id: str):
+    """获取任务状态和进度"""
+    try:
+        from celery.result import AsyncResult
+        from backend.celery_worker import celery_app
+        
+        task_result = AsyncResult(task_id, app=celery_app)
+        
+        if task_result.state == 'PENDING':
+            # 任务还在等待
+            response = {
+                'state': task_result.state,
+                'current': 0,
+                'total': 0,
+                'percent': 0,
+                'status': '等待中...'
+            }
+        elif task_result.state == 'PROGRESS':
+            # 任务正在执行
+            meta = task_result.info or {}
+            response = {
+                'state': task_result.state,
+                'current': meta.get('current', 0),
+                'total': meta.get('total', 0),
+                'percent': meta.get('percent', 0),
+                'status': meta.get('status', '处理中...'),
+                **{k: v for k, v in meta.items() if k not in ['current', 'total', 'percent', 'status']}
+            }
+        elif task_result.state == 'SUCCESS':
+            # 任务完成
+            result = task_result.result if isinstance(task_result.result, dict) else {}
+            meta = task_result.info if isinstance(task_result.info, dict) else {}
+            response = {
+                'state': task_result.state,
+                'current': meta.get('current', result.get('total', 0)),
+                'total': meta.get('total', result.get('total', 0)),
+                'percent': 100,
+                'status': '完成',
+                **result,
+                **{k: v for k, v in meta.items() if k not in ['current', 'total', 'percent', 'status']}
+            }
+        else:
+            # 任务失败或其他状态
+            response = {
+                'state': task_result.state,
+                'current': 0,
+                'total': 0,
+                'percent': 0,
+                'status': f'状态: {task_result.state}',
+                'error': str(task_result.info) if task_result.info else None
+            }
+        
+        return response
+    except Exception as e:
+        log.error(f"获取任务状态失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/task/{task_id}")
+async def cancel_task(task_id: str):
+    """取消任务（只能取消PENDING状态的任务）"""
+    try:
+        from celery.result import AsyncResult
+        from backend.celery_worker import celery_app
+        
+        task_result = AsyncResult(task_id, app=celery_app)
+        
+        if task_result.state == 'PENDING':
+            # 取消任务
+            celery_app.control.revoke(task_id, terminate=True)
+            log.info(f"任务 {task_id} 已取消")
+            return {"success": True, "message": "任务已取消"}
+        elif task_result.state in ['SUCCESS', 'FAILURE', 'REVOKED']:
+            return {"success": False, "message": f"任务已完成或已取消，当前状态: {task_result.state}"}
+        else:
+            # 任务正在执行，尝试终止
+            celery_app.control.revoke(task_id, terminate=True)
+            log.warning(f"尝试终止正在执行的任务 {task_id}，状态: {task_result.state}")
+            return {"success": True, "message": f"已尝试终止任务（状态: {task_result.state}）"}
+    except Exception as e:
+        log.error(f"取消任务失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tasks/purge")
+async def purge_tasks(
+    request: dict = Body(...)
+):
+    """清空所有待处理的任务队列
+    
+    Request body:
+        {
+            "task_name": "process_email"  # 可选，指定要清空的任务类型，如果不指定则清空所有
+        }
+    """
+    try:
+        from backend.celery_worker import celery_app
+        
+        task_name = request.get("task_name")
+        
+        if task_name:
+            # 清空指定任务类型
+            celery_app.control.purge()
+            log.warning(f"已清空任务队列（任务类型: {task_name}）")
+            return {
+                "success": True,
+                "message": f"已清空任务队列（任务类型: {task_name}）"
+            }
+        else:
+            # 清空所有任务
+            celery_app.control.purge()
+            log.warning("已清空所有任务队列")
+            return {
+                "success": True,
+                "message": "已清空所有任务队列"
+            }
+    except Exception as e:
+        log.error(f"清空任务队列失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/accounts", response_model=list[EmailAccountResponse])
 async def get_email_accounts(db: Session = Depends(get_db)):
     """获取所有邮箱账户"""
@@ -284,9 +436,39 @@ async def get_emails(
     sender: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    sync_deleted: bool = Query(False, description="是否同步检查已删除的邮件"),
     db: Session = Depends(get_db)
 ):
-    """获取邮件列表"""
+    """获取邮件列表
+    
+    Args:
+        sync_deleted: 如果为True，会先检查并同步已删除的邮件状态
+    """
+    # 如果请求同步已删除的邮件，先触发同步任务
+    task_ids = []  # 初始化task_ids变量
+    if sync_deleted:
+        try:
+            # 获取所有活跃账户
+            accounts = crud.get_active_email_accounts(db)
+            if account_id:
+                # 如果指定了account_id，只同步该账户
+                accounts = [acc for acc in accounts if acc.id == account_id]
+            
+            # 为每个账户触发同步任务
+            from backend.tasks.email_tasks import sync_email_status as sync_status_task
+            for account in accounts:
+                if account.provider == models.EmailProvider.GMAIL:
+                    result = sync_status_task.delay(account.id)
+                    task_ids.append(result.id)
+                    log.info(f"触发账户 {account.id} 的删除状态同步任务: {result.id}")
+            
+            # 如果有任务，继续执行，返回当前邮件列表（任务会在后台执行）
+            if task_ids:
+                log.info(f"已触发 {len(task_ids)} 个同步任务，继续返回当前邮件列表")
+        except Exception as e:
+            log.warning(f"触发删除状态同步任务失败: {e}")
+            # 不抛出异常，继续返回邮件列表
+    
     email_status = None
     if status:
         try:
@@ -311,10 +493,19 @@ async def get_emails(
         offset=offset
     )
     
-    return EmailListResponse(
-        total=total,
-        items=[EmailResponse.model_validate(email) for email in emails]
-    )
+    # 构建响应
+    response_dict = {
+        "total": total,
+        "items": [EmailResponse.model_validate(email) for email in emails]
+    }
+    
+    # 如果触发了同步任务，在响应中添加任务ID（使用dict而不是EmailListResponse以支持额外字段）
+    if sync_deleted and task_ids:
+        response_dict["task_id"] = task_ids[0]
+        response_dict["task_ids"] = task_ids
+        return response_dict
+    
+    return EmailListResponse(**response_dict)
 
 
 @router.get("/{email_id}", response_model=EmailResponse)
@@ -323,23 +514,67 @@ async def get_email(email_id: int, db: Session = Depends(get_db)):
     email = crud.get_email(db, email_id)
     if not email:
         raise HTTPException(status_code=404, detail="邮件不存在")
+    
+    # 如果邮件已被删除，返回404
+    if email.status == models.EmailStatus.DELETED:
+        raise HTTPException(status_code=404, detail="邮件已被删除")
+    
     return EmailResponse.model_validate(email)
 
 
 @router.post("/classify")
 async def classify_email(
-    request: ClassifyRequest,
+    request: Optional[ClassifyRequest] = Body(None),
     db: Session = Depends(get_db)
 ):
-    """手动触发邮件分类"""
-    email = crud.get_email(db, request.email_id)
-    if not email:
-        raise HTTPException(status_code=404, detail="邮件不存在")
+    """手动触发邮件分类
     
-    # 异步处理
-    result = process_email.delay(request.email_id, force=request.force)
-    
-    return {"success": True, "task_id": result.id}
+    如果提供了email_id，则分类指定邮件
+    如果没有提供email_id，则分类最新的10封未分类邮件
+    """
+    if request and request.email_id:
+        # 分类指定邮件
+        email = crud.get_email(db, request.email_id)
+        if not email:
+            raise HTTPException(status_code=404, detail="邮件不存在")
+        
+        # 异步处理
+        from backend.tasks.email_tasks import process_email
+        result = process_email.delay(request.email_id, force_classify=request.force if request.force else False)
+        
+        return {"success": True, "task_id": result.id, "message": "分类任务已提交"}
+    else:
+        # 分类最新的10封未分类邮件
+        from sqlalchemy import desc
+        from backend.db.models import Email
+        
+        # 获取最新的10封未分类邮件（按接收时间倒序）
+        unclassified_emails = db.query(Email).filter(
+            Email.category == None  # 未分类的邮件
+        ).order_by(desc(Email.received_at)).limit(10).all()
+        
+        if not unclassified_emails:
+            return {
+                "success": True,
+                "message": "没有未分类的邮件",
+                "classified_count": 0
+            }
+        
+        # 为每封邮件提交分类任务
+        task_ids = []
+        from backend.tasks.email_tasks import process_email
+        for email in unclassified_emails:
+            result = process_email.delay(email.id, force_classify=False)
+            task_ids.append(result.id)
+        
+        log.info(f"已提交 {len(unclassified_emails)} 封邮件的分类任务")
+        return {
+            "success": True,
+            "task_ids": task_ids,
+            "task_id": task_ids[0] if task_ids else None,
+            "classified_count": len(unclassified_emails),
+            "message": f"已提交 {len(unclassified_emails)} 封邮件的分类任务"
+        }
 
 
 @router.post("/draft")
@@ -372,11 +607,32 @@ async def mark_as_read(email_id: int, db: Session = Depends(get_db)):
     # 更新数据库
     crud.update_email(db, email_id, status=models.EmailStatus.READ)
     
-    # 更新邮箱中的状态
+    # 更新Gmail中的状态
     account = email.account
     if account.provider == models.EmailProvider.GMAIL:
         service = GmailService(account)
         service.mark_as_read(email.provider_message_id)
+    else:
+        raise HTTPException(status_code=400, detail="不支持的邮箱提供商")
+    
+    return {"success": True}
+
+
+@router.post("/{email_id}/mark-unread")
+async def mark_as_unread(email_id: int, db: Session = Depends(get_db)):
+    """标记邮件为未读"""
+    email = crud.get_email(db, email_id)
+    if not email:
+        raise HTTPException(status_code=404, detail="邮件不存在")
+    
+    # 更新数据库
+    crud.update_email(db, email_id, status=models.EmailStatus.UNREAD)
+    
+    # 更新Gmail中的状态
+    account = email.account
+    if account.provider == models.EmailProvider.GMAIL:
+        service = GmailService(account)
+        service.mark_as_unread(email.provider_message_id)
     else:
         raise HTTPException(status_code=400, detail="不支持的邮箱提供商")
     

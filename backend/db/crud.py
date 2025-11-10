@@ -104,15 +104,23 @@ def get_emails(
     category: Optional[models.ClassificationCategory] = None,
     sender: Optional[str] = None,
     limit: int = 50,
-    offset: int = 0
+    offset: int = 0,
+    exclude_deleted: bool = True  # 默认排除已删除的邮件
 ) -> tuple[List[models.Email], int]:
-    """获取邮件列表（带分页）"""
+    """获取邮件列表（带分页）
+    
+    Args:
+        exclude_deleted: 是否排除已删除的邮件（默认True）
+    """
     query = db.query(models.Email)
     
     if account_id:
         query = query.filter(models.Email.account_id == account_id)
     if status:
         query = query.filter(models.Email.status == status)
+    elif exclude_deleted:
+        # 默认排除已删除的邮件
+        query = query.filter(models.Email.status != models.EmailStatus.DELETED)
     if category:
         query = query.filter(models.Email.category == category)
     if sender:

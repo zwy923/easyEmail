@@ -124,17 +124,26 @@ class EmbeddingService:
             email: 邮件对象
             
         Returns:
-            Document对象，包含文本和元数据
+            Document对象，包含文本和元数据，如果失败返回None
         """
-        text = self._build_email_text(email)
-        
-        metadata = {
-            "email_id": email.id,
-            "subject": email.subject,
-            "sender": email.sender_email,
-            "received_at": email.received_at.isoformat() if email.received_at else None,
-            "category": email.category.value if email.category else None
-        }
-        
-        return Document(page_content=text, metadata=metadata)
+        try:
+            text = self._build_email_text(email)
+            
+            # 确保文本不为空
+            if not text or not text.strip():
+                log.warning(f"邮件 {email.id} 文本为空，跳过向量化")
+                return None
+            
+            metadata = {
+                "email_id": email.id,
+                "subject": email.subject or "",
+                "sender": email.sender_email or email.sender or "",
+                "received_at": email.received_at.isoformat() if email.received_at else None,
+                "category": email.category.value if email.category else None
+            }
+            
+            return Document(page_content=text, metadata=metadata)
+        except Exception as e:
+            log.error(f"创建邮件 {email.id} 的Document对象失败: {e}", exc_info=True)
+            return None
 

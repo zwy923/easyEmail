@@ -62,22 +62,29 @@ class VectorStoreService:
             是否成功
         """
         if not self.vector_store:
+            log.debug(f"向量存储未初始化，跳过邮件 {email.id}")
             return False
         
         try:
             # 创建Document对象
             doc = self.embedding_service.create_document(email)
             if not doc:
+                log.debug(f"邮件 {email.id} 无法创建Document对象，跳过向量化")
+                return False
+            
+            # 验证Document内容
+            if not doc.page_content or not doc.page_content.strip():
+                log.warning(f"邮件 {email.id} 的Document内容为空，跳过向量化")
                 return False
             
             # 添加到向量存储
             self.vector_store.add_documents([doc], ids=[str(email.id)])
             
-            log.info(f"邮件 {email.id} 已添加到向量存储")
+            log.debug(f"邮件 {email.id} 已添加到向量存储")
             return True
             
         except Exception as e:
-            log.error(f"添加邮件到向量存储失败: {e}", exc_info=True)
+            log.error(f"添加邮件 {email.id} 到向量存储失败: {e}", exc_info=True)
             return False
     
     def add_emails_batch(self, emails: List[Email]) -> int:
@@ -119,7 +126,8 @@ class VectorStoreService:
         self,
         query: str,
         k: int = None,
-        filter_dict: Optional[Dict] = None
+        filter_dict: Optional[Dict] = None,
+        db: Optional[Session] = None
     ) -> List[Document]:
         """搜索相似邮件
         
@@ -127,9 +135,10 @@ class VectorStoreService:
             query: 查询文本
             k: 返回数量（默认使用配置值）
             filter_dict: 过滤条件（元数据过滤）
+            db: 数据库会话（用于验证邮件是否存在）
             
         Returns:
-            相似邮件Document列表
+            相似邮件Document列表（已过滤掉不存在的邮件）
         """
         if not self.vector_store:
             return []
@@ -137,18 +146,48 @@ class VectorStoreService:
         try:
             k = k or settings.RAG_TOP_K
             
+            # 执行相似度搜索（搜索更多结果，以便后续过滤）
+            search_k = k * 2 if db else k  # 如果有数据库验证，搜索更多结果
+            
             # 执行相似度搜索
             if filter_dict:
                 results = self.vector_store.similarity_search_with_score(
                     query,
-                    k=k,
+                    k=search_k,
                     filter=filter_dict
                 )
             else:
-                results = self.vector_store.similarity_search_with_score(query, k=k)
+                results = self.vector_store.similarity_search_with_score(query, k=search_k)
             
             # 提取Document（去掉score）
             documents = [doc for doc, score in results]
+            
+            # 如果提供了数据库会话，验证邮件是否仍然存在（防止返回已删除的邮件）
+            if db:
+                from backend.db.models import Email, EmailStatus
+                valid_documents = []
+                for doc in documents:
+                    email_id = doc.metadata.get("email_id")
+                    if email_id:
+                        try:
+                            # 检查邮件是否存在且未被删除
+                            email = db.query(Email).filter(
+                                Email.id == email_id,
+                                Email.status != EmailStatus.DELETED
+                            ).first()
+                            if email:
+                                valid_documents.append(doc)
+                            else:
+                                log.debug(f"过滤已删除的邮件: {email_id}")
+                        except Exception as e:
+                            log.warning(f"验证邮件 {email_id} 失败: {e}")
+                            # 如果验证失败，为了安全起见，不包含该文档
+                    else:
+                        # 如果没有email_id，为了安全起见，不包含该文档
+                        log.warning("文档缺少email_id元数据，已过滤")
+                
+                # 返回指定数量的有效文档
+                documents = valid_documents[:k]
             
             log.debug(f"搜索相似邮件，查询: {query[:50]}..., 返回: {len(documents)} 条结果")
             return documents
@@ -160,16 +199,18 @@ class VectorStoreService:
     def get_email_context(
         self,
         email: Email,
-        k: int = None
+        k: int = None,
+        db: Optional[Session] = None
     ) -> List[Document]:
         """获取邮件的上下文（相似邮件）
         
         Args:
             email: 邮件对象
             k: 返回数量
+            db: 数据库会话（用于验证邮件是否存在）
             
         Returns:
-            相似邮件Document列表
+            相似邮件Document列表（已过滤掉不存在的邮件）
         """
         if not self.vector_store:
             return []
@@ -177,10 +218,10 @@ class VectorStoreService:
         # 构建查询文本
         query_text = self.embedding_service._build_email_text(email)
         
-        # 搜索相似邮件（排除自己）
+        # 搜索相似邮件（排除自己，并验证邮件是否存在）
         # 注意：PGVector的filter语法可能不同，先搜索更多结果然后过滤
         search_k = (k or settings.RAG_TOP_K) + 1
-        results = self.search_similar_emails(query_text, k=search_k)
+        results = self.search_similar_emails(query_text, k=search_k, db=db)
         
         # 过滤掉当前邮件
         filtered_results = [

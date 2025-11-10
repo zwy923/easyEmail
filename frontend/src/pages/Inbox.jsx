@@ -20,21 +20,39 @@ function Inbox() {
   const [ragQuery, setRagQuery] = useState('')
   const [ragResult, setRagResult] = useState(null)
   const [deleting, setDeleting] = useState(false)
+  const [taskProgress, setTaskProgress] = useState(null)
+  const [taskInterval, setTaskInterval] = useState(null)
 
   useEffect(() => {
     loadEmails()
   }, [filters])
 
-  const loadEmails = async () => {
+  const loadEmails = async (syncDeleted = false) => {
     try {
       setLoading(true)
       const params = {}
       if (filters.status) params.status = filters.status
       if (filters.category) params.category = filters.category
       if (filters.sender) params.sender = filters.sender
+      // 刷新时同步检查已删除的邮件
+      if (syncDeleted) {
+        params.sync_deleted = true
+      }
       
       const data = await axiosInstance.get('/email/list', { params })
-      setEmails(data.items || [])
+      
+      // 如果返回了任务ID，说明触发了同步任务，需要等待完成
+      if (data.task_id) {
+        // 开始监控进度
+        startTaskProgress(data.task_id)
+        // 不立即设置邮件列表，等待任务完成后再刷新
+        return
+      }
+      
+      // 正常返回邮件列表
+      if (data.items) {
+        setEmails(data.items || [])
+      }
     } catch (error) {
       console.error('加载邮件失败:', error)
     } finally {
@@ -42,25 +60,125 @@ function Inbox() {
     }
   }
 
+  const checkTaskProgress = async (taskId) => {
+    try {
+      const response = await axiosInstance.get(`/email/task/${taskId}`)
+      setTaskProgress(response)
+      
+      // 如果任务完成，刷新邮件列表
+      if (response.state === 'SUCCESS') {
+        // 清除轮询
+        if (taskInterval) {
+          clearInterval(taskInterval)
+          setTaskInterval(null)
+        }
+        // 立即刷新邮件列表（不传syncDeleted，避免再次触发同步）
+        await loadEmails(false)
+        // 3秒后清除进度提示
+        setTimeout(() => {
+          setTaskProgress(null)
+        }, 3000)
+      } else if (response.state === 'FAILURE' || response.state === 'REVOKED') {
+        // 任务失败，清除轮询
+        if (taskInterval) {
+          clearInterval(taskInterval)
+          setTaskInterval(null)
+        }
+        // 即使失败也刷新邮件列表
+        await loadEmails(false)
+        setTimeout(() => {
+          setTaskProgress(null)
+        }, 5000)
+      }
+    } catch (error) {
+      console.error('获取任务进度失败:', error)
+    }
+  }
+
+  const startTaskProgress = (taskId) => {
+    // 清除之前的轮询
+    if (taskInterval) {
+      clearInterval(taskInterval)
+    }
+    
+    // 立即检查一次
+    checkTaskProgress(taskId)
+    
+    // 每2秒轮询一次
+    const interval = setInterval(() => {
+      checkTaskProgress(taskId)
+    }, 2000)
+    
+    setTaskInterval(interval)
+  }
+
+  // 组件卸载时清除轮询
+  useEffect(() => {
+    return () => {
+      if (taskInterval) {
+        clearInterval(taskInterval)
+      }
+    }
+  }, [taskInterval])
+
   const handleMarkRead = async (emailId) => {
     try {
       await axiosInstance.post(`/email/${emailId}/mark-read`)
       loadEmails()
+      // 如果当前查看的是这封邮件，更新状态
+      if (selectedEmail && selectedEmail.id === emailId) {
+        loadEmailDetails(emailId)
+      }
     } catch (error) {
       console.error('标记已读失败:', error)
+      alert('标记已读失败: ' + (error.detail || '未知错误'))
     }
   }
 
-  const handleClassify = async (emailId) => {
+  const handleMarkUnread = async (emailId) => {
     try {
-      await axiosInstance.post('/email/classify', {
+      await axiosInstance.post(`/email/${emailId}/mark-unread`)
+      loadEmails()
+      // 如果当前查看的是这封邮件，更新状态
+      if (selectedEmail && selectedEmail.id === emailId) {
+        loadEmailDetails(emailId)
+      }
+    } catch (error) {
+      console.error('标记未读失败:', error)
+      alert('标记未读失败: ' + (error.detail || '未知错误'))
+    }
+  }
+
+  const handleClassify = async (emailId = null) => {
+    try {
+      // 如果提供了emailId，分类指定邮件；否则分类最新的10封未分类邮件
+      const requestData = emailId ? {
         email_id: emailId,
         force: true
-      })
-      alert('分类任务已提交')
-      setTimeout(loadEmails, 2000)
+      } : null
+      
+      const response = await axiosInstance.post('/email/classify', requestData)
+      
+      if (emailId) {
+        alert('分类任务已提交')
+        setTimeout(loadEmails, 2000)
+      } else {
+        // 批量分类
+        if (response.classified_count > 0) {
+          alert(`已提交 ${response.classified_count} 封邮件的分类任务`)
+          // 如果有任务ID，开始监控进度
+          if (response.task_id) {
+            startTaskProgress(response.task_id)
+          }
+          // 2秒后刷新列表
+          setTimeout(loadEmails, 2000)
+        } else {
+          alert('没有未分类的邮件')
+        }
+      }
     } catch (error) {
       console.error('分类失败:', error)
+      alert('分类失败: ' + (error.detail || '未知错误'))
     }
   }
 
@@ -227,8 +345,79 @@ function Inbox() {
     <div className="inbox">
       <div className="inbox-header">
         <h1>收件箱</h1>
-        <button className="button" onClick={loadEmails}>刷新</button>
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button className="button" onClick={() => loadEmails(true)}>刷新</button>
+          <button 
+            className="button button-primary" 
+            onClick={() => handleClassify()}
+            title="AI分类最新的10封未分类邮件"
+          >
+            AI分类
+          </button>
+          <button 
+            className="button" 
+            onClick={async () => {
+              try {
+                // 获取账户ID（假设只有一个账户，或者使用第一个）
+                const accounts = await axiosInstance.get('/email/accounts')
+                if (accounts && accounts.length > 0) {
+                  const response = await axiosInstance.post('/email/sync-status', {
+                    account_id: accounts[0].id
+                  })
+                  if (response.task_id) {
+                    startTaskProgress(response.task_id)
+                    alert('同步删除状态任务已提交，请等待完成')
+                  }
+                } else {
+                  alert('没有找到邮箱账户')
+                }
+              } catch (error) {
+                console.error('触发同步失败:', error)
+                alert('触发同步失败: ' + (error.detail || '未知错误'))
+              }
+            }}
+          >
+            同步删除状态
+          </button>
+        </div>
       </div>
+      
+      {/* 任务进度提示 */}
+      {taskProgress && (
+        <div className="card" style={{ marginBottom: '1rem', backgroundColor: '#f0f0f0' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
+            <strong>{taskProgress.status || '处理中...'}</strong>
+            <span>{taskProgress.percent || 0}%</span>
+          </div>
+          {taskProgress.total > 0 && (
+            <>
+              <div style={{ 
+                width: '100%', 
+                height: '8px', 
+                backgroundColor: '#ddd', 
+                borderRadius: '4px',
+                overflow: 'hidden',
+                marginBottom: '0.5rem'
+              }}>
+                <div style={{
+                  width: `${taskProgress.percent || 0}%`,
+                  height: '100%',
+                  backgroundColor: taskProgress.state === 'SUCCESS' ? '#4caf50' : '#2196f3',
+                  transition: 'width 0.3s ease'
+                }}></div>
+              </div>
+              <div style={{ fontSize: '0.9rem', color: '#666' }}>
+                {taskProgress.current || 0} / {taskProgress.total || 0}
+                {taskProgress.new_count !== undefined && ` | 新增: ${taskProgress.new_count}`}
+                {taskProgress.skipped_count !== undefined && ` | 跳过: ${taskProgress.skipped_count}`}
+                {taskProgress.error_count !== undefined && ` | 错误: ${taskProgress.error_count}`}
+                {taskProgress.deleted_count !== undefined && ` | 删除: ${taskProgress.deleted_count}`}
+                {taskProgress.updated_count !== undefined && ` | 更新: ${taskProgress.updated_count}`}
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <ConnectEmail onConnected={handleEmailConnected} />
 
@@ -335,17 +524,25 @@ function Inbox() {
                   <td>{format(new Date(email.received_at), 'yyyy-MM-dd HH:mm')}</td>
                   <td onClick={(e) => e.stopPropagation()}>
                     <div className="action-buttons">
-                      {email.status === 'unread' && (
+                      {email.status === 'unread' ? (
                         <button
                           className="button button-success"
                           onClick={() => handleMarkRead(email.id)}
                         >
                           标记已读
                         </button>
+                      ) : (
+                        <button
+                          className="button"
+                          onClick={() => handleMarkUnread(email.id)}
+                        >
+                          标记未读
+                        </button>
                       )}
                       <button
                         className="button"
                         onClick={() => handleClassify(email.id)}
+                        title="分类这封邮件"
                       >
                         分类
                       </button>
@@ -394,9 +591,22 @@ function Inbox() {
                   <button className="button" onClick={() => handleClassify(selectedEmail.id)}>重新分类</button>
                   <button className="button" onClick={() => handleGenerateDraft(selectedEmail.id)}>生成草稿</button>
                   <button className="button" onClick={() => handleGenerateDraftWithContext(selectedEmail.id, 'professional')}>智能草稿</button>
-                  {selectedEmail.status === 'unread' && (
+                  {selectedEmail.status === 'unread' ? (
                     <button className="button button-success" onClick={() => handleMarkRead(selectedEmail.id)}>标记已读</button>
+                  ) : (
+                    <button className="button" onClick={() => handleMarkUnread(selectedEmail.id)}>标记未读</button>
                   )}
+                  <button 
+                    className="button button-danger" 
+                    onClick={() => {
+                      if (window.confirm('确定要删除这封邮件吗？')) {
+                        handleDeleteEmail(selectedEmail.id)
+                      }
+                    }}
+                    disabled={deleting}
+                  >
+                    {deleting ? '删除中...' : '删除'}
+                  </button>
                 </div>
               </div>
               

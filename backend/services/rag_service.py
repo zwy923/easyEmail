@@ -234,7 +234,8 @@ class RAGService:
         self,
         query: str,
         k: int = None,
-        filter_dict: Optional[Dict] = None
+        filter_dict: Optional[Dict] = None,
+        db: Optional[Session] = None
     ) -> List[Document]:
         """搜索相关邮件
         
@@ -242,13 +243,15 @@ class RAGService:
             query: 查询文本
             k: 返回数量
             filter_dict: 过滤条件
+            db: 数据库会话（用于验证邮件是否存在）
             
         Returns:
-            相关邮件Document列表
+            相关邮件Document列表（已过滤掉已删除的邮件）
         """
         return self.vector_store_service.search_similar_emails(
             query,
             k=k,
-            filter_dict=filter_dict
+            filter_dict=filter_dict,
+            db=db
         )
 
