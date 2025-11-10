@@ -176,75 +176,6 @@ def update_email(db: Session, email_id: int, **kwargs) -> Optional[models.Email]
     return email
 
 
-# ========== 规则CRUD ==========
-def create_rule(db: Session, rule: schemas.RuleCreate) -> models.Rule:
-    """创建规则"""
-    db_rule = models.Rule(
-        name=rule.name,
-        description=rule.description,
-        is_active=rule.is_active,
-        priority=rule.priority,
-        conditions=rule.conditions.dict(),
-        actions=rule.actions.dict()
-    )
-    db.add(db_rule)
-    db.commit()
-    db.refresh(db_rule)
-    return db_rule
-
-
-def get_rule(db: Session, rule_id: int) -> Optional[models.Rule]:
-    """获取规则"""
-    return db.query(models.Rule).filter(models.Rule.id == rule_id).first()
-
-
-def get_rules(db: Session, is_active: Optional[bool] = None) -> List[models.Rule]:
-    """获取规则列表"""
-    query = db.query(models.Rule)
-    if is_active is not None:
-        query = query.filter(models.Rule.is_active == is_active)
-    return query.order_by(desc(models.Rule.priority), desc(models.Rule.created_at)).all()
-
-
-def update_rule(db: Session, rule_id: int, rule_update: schemas.RuleUpdate) -> Optional[models.Rule]:
-    """更新规则"""
-    rule = get_rule(db, rule_id)
-    if rule:
-        update_data = rule_update.dict(exclude_unset=True)
-        if "conditions" in update_data and update_data["conditions"]:
-            update_data["conditions"] = update_data["conditions"].dict()
-        if "actions" in update_data and update_data["actions"]:
-            update_data["actions"] = update_data["actions"].dict()
-        
-        for key, value in update_data.items():
-            if hasattr(rule, key):
-                setattr(rule, key, value)
-        db.commit()
-        db.refresh(rule)
-    return rule
-
-
-def delete_rule(db: Session, rule_id: int) -> bool:
-    """删除规则"""
-    rule = get_rule(db, rule_id)
-    if rule:
-        db.delete(rule)
-        db.commit()
-        return True
-    return False
-
-
-def increment_rule_match_count(db: Session, rule_id: int) -> Optional[models.Rule]:
-    """增加规则匹配次数"""
-    rule = get_rule(db, rule_id)
-    if rule:
-        rule.match_count += 1
-        rule.last_matched_at = datetime.utcnow()
-        db.commit()
-        db.refresh(rule)
-    return rule
-
-
 # ========== 草稿CRUD ==========
 def create_draft(db: Session, draft: schemas.DraftCreate) -> models.Draft:
     """创建草稿"""
@@ -276,43 +207,4 @@ def update_draft(db: Session, draft_id: int, **kwargs) -> Optional[models.Draft]
         db.refresh(draft)
     return draft
 
-
-# ========== 日志CRUD ==========
-def create_log(
-    db: Session,
-    level: str,
-    message: str,
-    module: Optional[str] = None,
-    action: Optional[str] = None,
-    details: Optional[dict] = None
-) -> models.Log:
-    """创建日志"""
-    db_log = models.Log(
-        level=level,
-        module=module,
-        action=action,
-        message=message,
-        details=details
-    )
-    db.add(db_log)
-    db.commit()
-    db.refresh(db_log)
-    return db_log
-
-
-def get_logs(
-    db: Session,
-    level: Optional[str] = None,
-    limit: int = 100,
-    offset: int = 0
-) -> tuple[List[models.Log], int]:
-    """获取日志列表"""
-    query = db.query(models.Log)
-    if level:
-        query = query.filter(models.Log.level == level)
-    
-    total = query.count()
-    items = query.order_by(desc(models.Log.created_at)).offset(offset).limit(limit).all()
-    
-    return items, total
 

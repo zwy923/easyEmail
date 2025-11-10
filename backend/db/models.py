@@ -30,15 +30,6 @@ class ClassificationCategory(str, enum.Enum):
     PROMOTION = "promotion"
 
 
-class RuleAction(str, enum.Enum):
-    """规则动作"""
-    CLASSIFY = "classify"
-    DRAFT = "draft"
-    MARK = "mark"
-    FORWARD = "forward"
-    REMIND = "remind"
-
-
 class User(Base):
     """用户表"""
     __tablename__ = "users"
@@ -103,40 +94,6 @@ class Email(Base):
     drafts = relationship("Draft", back_populates="email", cascade="all, delete-orphan")
 
 
-class Rule(Base):
-    """规则表"""
-    __tablename__ = "rules"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(255), nullable=False)
-    description = Column(Text)
-    is_active = Column(Boolean, default=True)
-    priority = Column(Integer, default=0)  # 优先级，数字越大优先级越高
-    
-    # 条件（JSON格式）
-    conditions = Column(JSON, nullable=False)  # {
-    #   "sender": {"contains": "example.com"},
-    #   "subject": {"contains": "urgent"},
-    #   "body": {"contains": "meeting"},
-    #   "date_range": {"after": "2024-01-01"}
-    # }
-    
-    # 动作（JSON格式）
-    actions = Column(JSON, nullable=False)  # {
-    #   "type": "classify",
-    #   "category": "urgent",
-    #   "mark_important": true,
-    #   "generate_draft": true,
-    #   "forward_to": "admin@example.com",
-    #   "remind_after_hours": 24
-    # }
-    
-    match_count = Column(Integer, default=0)  # 匹配次数
-    last_matched_at = Column(DateTime(timezone=True))
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-
-
 class Draft(Base):
     """草稿表"""
     __tablename__ = "drafts"
@@ -152,19 +109,6 @@ class Draft(Base):
     
     # 关系
     email = relationship("Email", back_populates="drafts")
-
-
-class Log(Base):
-    """日志表"""
-    __tablename__ = "logs"
-    
-    id = Column(Integer, primary_key=True, index=True)
-    level = Column(String(50), index=True)  # INFO, WARNING, ERROR
-    module = Column(String(255))
-    action = Column(String(255))  # 操作类型
-    message = Column(Text)
-    details = Column(JSON)  # 详细信息
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class EmailEmbedding(Base):

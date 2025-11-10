@@ -1,15 +1,14 @@
-# AI邮件编排系统
+# EZmail重新设计现代和美观的排版
 
-统一管理Gmail邮箱，自动分类、生成草稿回复、标记和提醒的智能邮件编排系统。
+统一管理Gmail邮箱，自动分类、生成草稿回复、标记和提醒的智能邮件工作台。
 
 ## 功能特性
 
 - **Gmail支持**: 支持Gmail邮箱的统一管理
 - **智能分类**: 使用OpenAI GPT模型自动分类邮件（紧急、重要、普通、垃圾、促销）
 - **草稿生成**: AI自动生成邮件回复草稿
-- **规则引擎**: 可配置的规则系统，支持条件匹配和自动动作
-- **定时任务**: 自动检查新邮件、分类和规则匹配
-- **Web Dashboard**: 现代化的Web界面，可视化邮件和规则管理
+- **定时任务**: 自动检查新邮件和分类处理
+- **Web Dashboard**: 现代化的Web界面，可视化邮件与草稿管理
 
 ## 技术栈
 
@@ -37,12 +36,10 @@ ai_email_orchestrator/
 │   ├── main.py             # FastAPI入口
 │   ├── config.py           # 配置文件
 │   ├── api/                # API路由
-│   │   ├── routes_email.py
-│   │   └── routes_rules.py
+│   │   └── routes_email.py
 │   ├── services/           # 业务服务
 │   │   ├── gmail_service.py
 │   │   ├── classification_service.py
-│   │   ├── rule_engine.py
 │   │   └── scheduler.py
 │   ├── tasks/             # Celery任务
 │   │   └── email_tasks.py
@@ -134,15 +131,6 @@ docker-compose up -d
 - `POST /api/email/{email_id}/mark-read`: 标记为已读
 - `POST /api/email/{email_id}/mark-important`: 标记为重要
 
-### 规则相关
-
-- `GET /api/rules`: 获取规则列表
-- `GET /api/rules/{rule_id}`: 获取规则详情
-- `POST /api/rules`: 创建规则
-- `PUT /api/rules/{rule_id}`: 更新规则
-- `DELETE /api/rules/{rule_id}`: 删除规则
-- `POST /api/rules/{rule_id}/toggle`: 启用/禁用规则
-
 ## 使用指南
 
 ### 1. 连接邮箱
@@ -153,15 +141,7 @@ docker-compose up -d
 4. 完成OAuth授权
 5. 系统将自动开始获取邮件
 
-### 2. 配置规则
-
-1. 进入"规则"页面
-2. 点击"新建规则"
-3. 设置条件（发件人、主题、正文等）
-4. 配置动作（分类、标记、生成草稿等）
-5. 保存规则
-
-### 3. 查看邮件
+### 2. 查看邮件
 
 1. 进入"收件箱"页面
 2. 查看自动分类的邮件
@@ -209,7 +189,7 @@ celery -A backend.celery_worker beat --loglevel=info
 系统配置了以下定时任务：
 
 - **每5分钟**: 自动检查所有邮箱账户的新邮件
-- **邮件处理**: 新邮件自动触发分类和规则匹配
+- **邮件处理**: 新邮件自动触发分类任务
 
 ## 数据库迁移
 
@@ -222,10 +202,6 @@ docker-compose exec backend bash
 # 使用Alembic（如果配置了）
 alembic upgrade head
 ```
-
-## 日志
-
-日志文件存储在`logs/`目录下，按日期分割。
 
 ## 故障排除
 

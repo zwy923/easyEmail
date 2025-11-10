@@ -1,6 +1,6 @@
 """Celery异步任务定义"""
 from celery import Task
-from typing import List, Dict
+from typing import List
 from datetime import datetime
 
 from backend.celery_worker import celery_app
@@ -9,7 +9,6 @@ from backend.db.database import SessionLocal
 from backend.db import crud, models
 from backend.services.gmail_service import GmailService
 from backend.services.classification_service import ClassificationService
-from backend.services.rule_engine import RuleEngine
 
 
 class DatabaseTask(Task):
@@ -220,7 +219,7 @@ def fetch_emails_from_account(self, account_id: int):
 
 @celery_app.task(base=DatabaseTask, bind=True)
 def process_email(self, email_id: int, force_classify: bool = False):
-    """处理邮件：分类和规则匹配"""
+    """处理邮件：分类"""
     db = self.db
     try:
         email = crud.get_email(db, email_id)
@@ -242,59 +241,10 @@ def process_email(self, email_id: int, force_classify: bool = False):
                 results["category"] = category.value
                 log.info(f"邮件 {email_id} 分类为: {category.value}")
         
-        # 规则匹配
-        try:
-            rule_engine = RuleEngine()
-            rule_results = rule_engine.process_email_with_rules(email, db)
-            results["rules_matched"] = len(rule_results)
-            results["rule_results"] = rule_results
-        except Exception as rule_error:
-            log.error(f"规则匹配失败: {rule_error}", exc_info=True)
-            results["rules_matched"] = 0
-            results["rule_results"] = []
-            results["rule_error"] = str(rule_error)
-        
-        # 记录日志
-        try:
-            # 确保details是可序列化的字典
-            log_details = {}
-            if isinstance(results, dict):
-                for k, v in results.items():
-                    # 只序列化基本类型，避免复杂对象
-                    if isinstance(v, (str, int, float, bool, type(None))):
-                        log_details[k] = v
-                    elif isinstance(v, list):
-                        log_details[k] = str(v)[:200]  # 限制长度
-                    else:
-                        log_details[k] = str(v)[:200]  # 转换为字符串并限制长度
-            
-            crud.create_log(
-                db,
-                level="INFO",
-                message=f"处理邮件 {email_id}",
-                module="email_tasks",
-                action="process_email",
-                details=log_details if log_details else None
-            )
-        except Exception as log_error:
-            log.warning(f"记录日志失败: {log_error}", exc_info=True)
-        
         return {"success": True, **results}
-        
+
     except Exception as e:
         log.error(f"处理邮件失败: {e}", exc_info=True)
-        # 尝试记录错误日志，但不让日志记录失败影响主流程
-        try:
-            crud.create_log(
-                db,
-                level="ERROR",
-                message=f"处理邮件 {email_id} 失败: {str(e)[:500]}",
-                module="email_tasks",
-                action="process_email",
-                details={"error": str(e)[:500]}
-            )
-        except:
-            pass  # 忽略日志记录错误
         return {"success": False, "message": str(e)}
 
 

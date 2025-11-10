@@ -2,7 +2,7 @@
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
-from backend.db.models import EmailProvider, EmailStatus, ClassificationCategory, RuleAction
+from backend.db.models import EmailProvider, EmailStatus, ClassificationCategory
 
 
 # ========== 用户相关 ==========
@@ -93,57 +93,6 @@ class EmailListResponse(BaseModel):
     items: List[EmailResponse]
 
 
-# ========== 规则相关 ==========
-class RuleCondition(BaseModel):
-    """规则条件"""
-    sender: Optional[Dict[str, Any]] = None
-    subject: Optional[Dict[str, Any]] = None
-    body: Optional[Dict[str, Any]] = None
-    date_range: Optional[Dict[str, Any]] = None
-
-
-class RuleActionConfig(BaseModel):
-    """规则动作配置"""
-    type: RuleAction
-    category: Optional[ClassificationCategory] = None
-    mark_important: Optional[bool] = False
-    generate_draft: Optional[bool] = False
-    forward_to: Optional[str] = None
-    remind_after_hours: Optional[int] = None
-
-
-class RuleBase(BaseModel):
-    name: str
-    description: Optional[str] = None
-    is_active: bool = True
-    priority: int = 0
-    conditions: RuleCondition
-    actions: RuleActionConfig
-
-
-class RuleCreate(RuleBase):
-    pass
-
-
-class RuleUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    is_active: Optional[bool] = None
-    priority: Optional[int] = None
-    conditions: Optional[RuleCondition] = None
-    actions: Optional[RuleActionConfig] = None
-
-
-class RuleResponse(RuleBase):
-    id: int
-    match_count: int
-    last_matched_at: Optional[datetime] = None
-    created_at: datetime
-    updated_at: Optional[datetime] = None
-    
-    model_config = {"from_attributes": True}
-
-
 # ========== 草稿相关 ==========
 class DraftBase(BaseModel):
     subject: Optional[str] = None
@@ -161,19 +110,6 @@ class DraftResponse(DraftBase):
     is_sent: bool
     created_at: datetime
     updated_at: Optional[datetime] = None
-    
-    model_config = {"from_attributes": True}
-
-
-# ========== 日志相关 ==========
-class LogResponse(BaseModel):
-    id: int
-    level: str
-    module: Optional[str] = None
-    action: Optional[str] = None
-    message: str
-    details: Optional[Dict[str, Any]] = None
-    created_at: datetime
     
     model_config = {"from_attributes": True}
 
