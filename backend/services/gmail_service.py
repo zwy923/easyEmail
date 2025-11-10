@@ -1,5 +1,5 @@
 """Gmail API服务"""
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 from datetime import datetime
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -210,7 +210,14 @@ class GmailService:
                     return self.get_message(message_id)
             return None
     
-    def send_message(self, to: str, subject: str, body: str, is_html: bool = False) -> Optional[str]:
+    def send_message(
+        self,
+        to: str,
+        subject: str,
+        body: str,
+        is_html: bool = False,
+        thread_id: Optional[str] = None
+    ) -> Optional[str]:
         """发送邮件"""
         if not self.service:
             if not self.refresh_token():
@@ -248,7 +255,7 @@ class GmailService:
             log.error(f"发送Gmail邮件失败: {e}")
             if e.resp.status == 401:
                 if self.refresh_token():
-                    return self.send_message(to, subject, body, is_html)
+                    return self.send_message(to, subject, body, is_html, thread_id)
             return None
     
     def create_draft(self, to: str, subject: str, body: str, thread_id: Optional[str] = None) -> Optional[str]:
@@ -351,39 +358,44 @@ class GmailService:
         """标记为重要"""
         return self.modify_message(message_id, add_labels=['IMPORTANT'])
     
-    def check_message_exists(self, message_id: str) -> bool:
-        """检查邮件是否在Gmail中存在
-        
-        Args:
-            message_id: Gmail消息ID
-            
-        Returns:
-            如果存在返回True，如果不存在（已删除）返回False
-        """
+    def get_message_state(self, message_id: str) -> Tuple[bool, Optional[str]]:
+        """获取邮件是否存在以及状态信息"""
         if not self.service:
             if not self.refresh_token():
-                return False
-        
+                return False, None
+
         try:
-            # 只获取metadata，不获取完整邮件内容，提高性能
-            self.service.users().messages().get(
+            message = self.service.users().messages().get(
                 userId='me',
                 id=message_id,
                 format='metadata',
                 metadataHeaders=[]
             ).execute()
-            return True
+
+            labels = message.get('labelIds', [])
+            status = 'unread' if 'UNREAD' in labels else 'read'
+            return True, status
         except HttpError as e:
             if e.resp.status == 404:
-                # 邮件不存在（已删除）
-                return False
-            elif e.resp.status == 401:
-                # Token过期，尝试刷新
+                return False, None
+            if e.resp.status == 401:
                 if self.refresh_token():
-                    return self.check_message_exists(message_id)
-            log.error(f"检查Gmail邮件是否存在失败: {e}")
-            return False
-    
+                    return self.get_message_state(message_id)
+            log.error(f"获取Gmail邮件状态失败: {e}")
+            return False, None
+
+    def check_message_exists(self, message_id: str) -> bool:
+        """检查邮件是否在Gmail中存在
+
+        Args:
+            message_id: Gmail消息ID
+
+        Returns:
+            如果存在返回True，如果不存在（已删除）返回False
+        """
+        exists, _ = self.get_message_state(message_id)
+        return exists
+
     def get_message_status(self, message_id: str) -> Optional[str]:
         """获取邮件的已读/未读状态（只获取metadata，不获取完整内容）
         
@@ -393,34 +405,8 @@ class GmailService:
         Returns:
             'read' 或 'unread'，如果失败或邮件不存在返回None
         """
-        if not self.service:
-            if not self.refresh_token():
-                return None
-        
-        try:
-            # 只获取metadata，不获取完整邮件内容，提高性能
-            message = self.service.users().messages().get(
-                userId='me',
-                id=message_id,
-                format='metadata',
-                metadataHeaders=[]  # 不需要metadata headers，只需要labelIds
-            ).execute()
-            
-            labels = message.get('labelIds', [])
-            # 如果包含UNREAD标签，则为未读
-            if 'UNREAD' in labels:
-                return 'unread'
-            else:
-                return 'read'
-        except HttpError as e:
-            if e.resp.status == 404:
-                # 邮件不存在（已删除）
-                return None
-            log.error(f"获取Gmail邮件状态失败: {e}")
-            if e.resp.status == 401:
-                if self.refresh_token():
-                    return self.get_message_status(message_id)
-            return None
+        exists, status = self.get_message_state(message_id)
+        return status if exists else None
     
     def delete_message(self, message_id: str) -> bool:
         """删除邮件

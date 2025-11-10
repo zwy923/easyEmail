@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import axiosInstance from '../api/axiosInstance'
 import { format } from 'date-fns'
 import ConnectEmail from '../components/ConnectEmail'
@@ -21,7 +21,14 @@ function Inbox() {
   const [ragResult, setRagResult] = useState(null)
   const [deleting, setDeleting] = useState(false)
   const [taskProgress, setTaskProgress] = useState(null)
-  const [taskInterval, setTaskInterval] = useState(null)
+  const taskIntervalRef = useRef(null)
+
+  const clearTaskInterval = () => {
+    if (taskIntervalRef.current) {
+      clearInterval(taskIntervalRef.current)
+      taskIntervalRef.current = null
+    }
+  }
 
   useEffect(() => {
     loadEmails()
@@ -68,10 +75,7 @@ function Inbox() {
       // 如果任务完成，刷新邮件列表
       if (response.state === 'SUCCESS') {
         // 清除轮询
-        if (taskInterval) {
-          clearInterval(taskInterval)
-          setTaskInterval(null)
-        }
+        clearTaskInterval()
         // 立即刷新邮件列表（不传syncDeleted，避免再次触发同步）
         await loadEmails(false)
         // 3秒后清除进度提示
@@ -80,10 +84,7 @@ function Inbox() {
         }, 3000)
       } else if (response.state === 'FAILURE' || response.state === 'REVOKED') {
         // 任务失败，清除轮询
-        if (taskInterval) {
-          clearInterval(taskInterval)
-          setTaskInterval(null)
-        }
+        clearTaskInterval()
         // 即使失败也刷新邮件列表
         await loadEmails(false)
         setTimeout(() => {
@@ -97,9 +98,7 @@ function Inbox() {
 
   const startTaskProgress = (taskId) => {
     // 清除之前的轮询
-    if (taskInterval) {
-      clearInterval(taskInterval)
-    }
+    clearTaskInterval()
     
     // 立即检查一次
     checkTaskProgress(taskId)
@@ -108,18 +107,16 @@ function Inbox() {
     const interval = setInterval(() => {
       checkTaskProgress(taskId)
     }, 2000)
-    
-    setTaskInterval(interval)
+
+    taskIntervalRef.current = interval
   }
 
   // 组件卸载时清除轮询
   useEffect(() => {
     return () => {
-      if (taskInterval) {
-        clearInterval(taskInterval)
-      }
+      clearTaskInterval()
     }
-  }, [taskInterval])
+  }, [])
 
   const handleMarkRead = async (emailId) => {
     try {
