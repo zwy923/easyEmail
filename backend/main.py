@@ -55,6 +55,20 @@ app.add_middleware(
 app.include_router(routes_email.router, prefix="/api/email", tags=["邮件"])
 app.include_router(routes_rules.router, prefix="/api/rules", tags=["规则"])
 
+# 注册日志路由
+try:
+    from backend.api import routes_logs
+    app.include_router(routes_logs.router, prefix="/api/logs", tags=["日志"])
+except ImportError:
+    log.warning("日志路由模块未找到，跳过注册")
+
+# 注册草稿路由
+try:
+    from backend.api import routes_drafts
+    app.include_router(routes_drafts.router, prefix="/api/drafts", tags=["草稿"])
+except ImportError:
+    log.warning("草稿路由模块未找到，跳过注册")
+
 
 @app.get("/")
 async def root():

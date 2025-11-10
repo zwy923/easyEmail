@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import axiosInstance from '../api/axiosInstance'
 import { format } from 'date-fns'
+import ConnectEmail from '../components/ConnectEmail'
 import './Dashboard.css'
 
 function Dashboard() {
@@ -12,10 +13,21 @@ function Dashboard() {
   })
   const [recentEmails, setRecentEmails] = useState([])
   const [loading, setLoading] = useState(true)
+  const [accounts, setAccounts] = useState([])
 
   useEffect(() => {
     loadDashboardData()
+    loadAccounts()
   }, [])
+
+  const loadAccounts = async () => {
+    try {
+      const data = await axiosInstance.get('/email/accounts')
+      setAccounts(data || [])
+    } catch (error) {
+      console.error('加载账户失败:', error)
+    }
+  }
 
   const loadDashboardData = async () => {
     try {
@@ -59,9 +71,16 @@ function Dashboard() {
     return <div className="loading">加载中...</div>
   }
 
+  const handleEmailConnected = () => {
+    loadDashboardData()
+    loadAccounts()
+  }
+
   return (
     <div className="dashboard">
       <h1>总览</h1>
+      
+      <ConnectEmail onConnected={handleEmailConnected} />
       
       <div className="stats-grid">
         <div className="stat-card">

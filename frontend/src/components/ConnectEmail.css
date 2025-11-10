@@ -1,0 +1,49 @@
+.connect-email {
+  margin-bottom: 2rem;
+}
+
+.no-accounts {
+  text-align: center;
+  padding: 2rem;
+}
+
+.no-accounts p {
+  margin-bottom: 1rem;
+  color: #666;
+}
+
+.accounts-list {
+  margin-bottom: 1rem;
+}
+
+.account-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+  background: #f9f9f9;
+}
+
+.account-info {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.account-info strong {
+  margin-right: 0.5rem;
+}
+
+.account-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.badge-provider {
+  background: #2196F3;
+  color: white;
+}
+

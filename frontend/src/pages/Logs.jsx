@@ -15,10 +15,10 @@ function Logs() {
   const loadLogs = async () => {
     try {
       setLoading(true)
-      // 注意：这里假设有日志API，如果没有可以暂时显示占位内容
-      // const data = await axiosInstance.get('/logs', { params: { level: filter || undefined } })
-      // setLogs(data.items || [])
-      setLogs([])
+      const params = {}
+      if (filter) params.level = filter
+      const data = await axiosInstance.get('/logs', { params })
+      setLogs(data || [])
     } catch (error) {
       console.error('加载日志失败:', error)
       setLogs([])

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import axiosInstance from '../api/axiosInstance'
 import { format } from 'date-fns'
+import ConnectEmail from '../components/ConnectEmail'
 import './Inbox.css'
 
 function Inbox() {
@@ -12,6 +13,11 @@ function Inbox() {
     sender: ''
   })
   const [selectedEmail, setSelectedEmail] = useState(null)
+  const [similarEmails, setSimilarEmails] = useState([])
+  const [drafts, setDrafts] = useState([])
+  const [loadingSimilar, setLoadingSimilar] = useState(false)
+  const [ragQuery, setRagQuery] = useState('')
+  const [ragResult, setRagResult] = useState(null)
 
   useEffect(() => {
     loadEmails()
@@ -64,8 +70,63 @@ function Inbox() {
         length: 'medium'
       })
       alert('草稿生成任务已提交')
+      if (selectedEmail && selectedEmail.id === emailId) {
+        loadEmailDetails(emailId)
+      }
     } catch (error) {
       console.error('生成草稿失败:', error)
+    }
+  }
+
+  const handleGenerateDraftWithContext = async (emailId, tone = 'professional') => {
+    try {
+      const response = await axiosInstance.post(`/email/${emailId}/draft-with-context?tone=${tone}`)
+      if (response.draft) {
+        alert('带上下文的草稿已生成')
+        loadEmailDetails(emailId)
+      }
+    } catch (error) {
+      console.error('生成上下文草稿失败:', error)
+      alert('生成失败: ' + (error.detail || '未知错误'))
+    }
+  }
+
+  const loadEmailDetails = async (emailId) => {
+    try {
+      // 加载邮件详情
+      const emailData = await axiosInstance.get(`/email/${emailId}`)
+      setSelectedEmail(emailData)
+      
+      // 加载相似邮件
+      setLoadingSimilar(true)
+      try {
+        const similarData = await axiosInstance.get(`/email/${emailId}/similar?limit=5`)
+        setSimilarEmails(similarData.similar_emails || [])
+      } catch (error) {
+        console.error('加载相似邮件失败:', error)
+        setSimilarEmails([])
+      } finally {
+        setLoadingSimilar(false)
+      }
+      
+      // 加载草稿（如果有草稿API）
+      // const draftsData = await axiosInstance.get(`/email/${emailId}/drafts`)
+      // setDrafts(draftsData || [])
+    } catch (error) {
+      console.error('加载邮件详情失败:', error)
+    }
+  }
+
+  const handleRAGQuery = async () => {
+    if (!ragQuery.trim()) return
+    try {
+      const response = await axiosInstance.post('/email/rag/query', {
+        question: ragQuery
+      })
+      setRagResult(response)
+    } catch (error) {
+      console.error('RAG查询失败:', error)
+      alert('查询失败: ' + (error.detail || '未知错误'))
     }
   }
 
@@ -78,12 +139,18 @@ function Inbox() {
     return <div className="loading">加载中...</div>
   }
 
+  const handleEmailConnected = () => {
+    loadEmails()
+  }
+
   return (
     <div className="inbox">
       <div className="inbox-header">
         <h1>收件箱</h1>
         <button className="button" onClick={loadEmails}>刷新</button>
       </div>
+
+      <ConnectEmail onConnected={handleEmailConnected} />
 
       <div className="card">
         <h2>筛选</h2>
@@ -142,7 +209,7 @@ function Inbox() {
                 <tr
                   key={email.id}
                   className={email.status === 'unread' ? 'row-unread' : ''}
-                  onClick={() => setSelectedEmail(email)}
+                  onClick={() => loadEmailDetails(email.id)}
                   style={{ cursor: 'pointer' }}
                 >
                   <td>{email.sender || email.sender_email}</td>
@@ -187,26 +254,91 @@ function Inbox() {
       </div>
 
       {selectedEmail && (
-        <div className="modal" onClick={() => setSelectedEmail(null)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal" onClick={() => { setSelectedEmail(null); setSimilarEmails([]); setRagResult(null) }}>
+          <div className="modal-content email-detail-modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h2>{selectedEmail.subject || '(无主题)'}</h2>
-              <button className="button" onClick={() => setSelectedEmail(null)}>关闭</button>
+              <button className="button" onClick={() => { setSelectedEmail(null); setSimilarEmails([]); setRagResult(null) }}>关闭</button>
             </div>
             <div className="modal-body">
-              <p><strong>发件人:</strong> {selectedEmail.sender} ({selectedEmail.sender_email})</p>
-              <p><strong>时间:</strong> {format(new Date(selectedEmail.received_at), 'yyyy-MM-dd HH:mm:ss')}</p>
-              {selectedEmail.category && (
-                <p>
-                  <strong>类别:</strong>{' '}
-                  <span className={`badge ${getCategoryBadgeClass(selectedEmail.category)}`}>
-                    {selectedEmail.category}
-                  </span>
-                </p>
-              )}
+              <div className="email-detail-info">
+                <p><strong>发件人:</strong> {selectedEmail.sender} ({selectedEmail.sender_email})</p>
+                <p><strong>时间:</strong> {format(new Date(selectedEmail.received_at), 'yyyy-MM-dd HH:mm:ss')}</p>
+                {selectedEmail.category && (
+                  <p>
+                    <strong>类别:</strong>{' '}
+                    <span className={`badge ${getCategoryBadgeClass(selectedEmail.category)}`}>
+                      {selectedEmail.category}
+                    </span>
+                  </p>
+                )}
+                <div className="email-actions">
+                  <button className="button" onClick={() => handleClassify(selectedEmail.id)}>重新分类</button>
+                  <button className="button" onClick={() => handleGenerateDraft(selectedEmail.id)}>生成草稿</button>
+                  <button className="button" onClick={() => handleGenerateDraftWithContext(selectedEmail.id, 'professional')}>智能草稿</button>
+                  {selectedEmail.status === 'unread' && (
+                    <button className="button button-success" onClick={() => handleMarkRead(selectedEmail.id)}>标记已读</button>
+                  )}
+                </div>
+              </div>
+              
               <div className="email-body">
                 <h3>正文:</h3>
                 <div dangerouslySetInnerHTML={{ __html: selectedEmail.body_html || selectedEmail.body_text }} />
+              </div>
+
+              <div className="email-tabs">
+                <div className="tab-section">
+                  <h3>相似邮件</h3>
+                  {loadingSimilar ? (
+                    <p>加载中...</p>
+                  ) : similarEmails.length > 0 ? (
+                    <ul className="similar-emails-list">
+                      {similarEmails.map((similar, idx) => (
+                        <li key={idx} className="similar-email-item">
+                          <strong>{similar.subject || '(无主题)'}</strong>
+                          <span className="similar-sender">{similar.sender}</span>
+                          <p className="similar-content">{similar.similarity_content}...</p>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p>暂无相似邮件</p>
+                  )}
+                </div>
+
+                <div className="tab-section">
+                  <h3>RAG 智能问答</h3>
+                  <div className="rag-query">
+                    <input
+                      className="input"
+                      type="text"
+                      placeholder="输入问题，基于历史邮件进行智能回答..."
+                      value={ragQuery}
+                      onChange={(e) => setRagQuery(e.target.value)}
+                      onKeyPress={(e) => e.key === 'Enter' && handleRAGQuery()}
+                    />
+                    <button className="button" onClick={handleRAGQuery}>查询</button>
+                  </div>
+                  {ragResult && (
+                    <div className="rag-result">
+                      <h4>回答:</h4>
+                      <p>{ragResult.answer}</p>
+                      {ragResult.source_documents && ragResult.source_documents.length > 0 && (
+                        <div className="rag-sources">
+                          <h5>来源邮件:</h5>
+                          <ul>
+                            {ragResult.source_documents.map((doc, idx) => (
+                              <li key={idx}>
+                                <strong>{doc.metadata?.subject || '无主题'}</strong> - {doc.metadata?.sender}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>

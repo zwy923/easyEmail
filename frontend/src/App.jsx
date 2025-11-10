@@ -4,6 +4,7 @@ import Dashboard from './pages/Dashboard'
 import Rules from './pages/Rules'
 import Inbox from './pages/Inbox'
 import Logs from './pages/Logs'
+import Drafts from './pages/Drafts'
 import './App.css'
 
 function App() {
@@ -16,6 +17,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/rules" element={<Rules />} />
             <Route path="/inbox" element={<Inbox />} />
+            <Route path="/drafts" element={<Drafts />} />
             <Route path="/logs" element={<Logs />} />
           </Routes>
         </main>
@@ -30,6 +32,7 @@ function NavBar() {
   const navItems = [
     { path: '/', label: '总览' },
     { path: '/inbox', label: '收件箱' },
+    { path: '/drafts', label: '草稿' },
     { path: '/rules', label: '规则' },
     { path: '/logs', label: '日志' },
   ]

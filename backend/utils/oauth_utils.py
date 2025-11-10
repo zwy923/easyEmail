@@ -57,10 +57,12 @@ def get_gmail_auth_url(state: str) -> str:
     from google.oauth2.credentials import Credentials
     
     scopes = [
+        'openid',  # Google OAuth 会自动添加，显式包含以避免scope不匹配
         'https://www.googleapis.com/auth/gmail.readonly',
         'https://www.googleapis.com/auth/gmail.send',
         'https://www.googleapis.com/auth/gmail.modify',
-        'https://www.googleapis.com/auth/gmail.compose'
+        'https://www.googleapis.com/auth/gmail.compose',
+        'https://www.googleapis.com/auth/userinfo.email'  # 获取用户email
     ]
     
     flow = Flow.from_client_config(

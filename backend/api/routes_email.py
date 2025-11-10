@@ -1,5 +1,6 @@
 """邮件相关API路由"""
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -31,12 +32,142 @@ async def get_auth_url(provider: str):
     return {"auth_url": auth_url, "state": state}
 
 
+@router.get("/gmail/callback")
+async def gmail_callback(
+    code: str = Query(..., description="OAuth授权码"),
+    state: Optional[str] = Query(None, description="OAuth state参数"),
+    error: Optional[str] = Query(None, description="错误信息"),
+    db: Session = Depends(get_db)
+):
+    """Gmail OAuth回调处理"""
+    if error:
+        log.error(f"Gmail OAuth授权失败: {error}")
+        raise HTTPException(status_code=400, detail=f"授权失败: {error}")
+    
+    if not code:
+        raise HTTPException(status_code=400, detail="缺少授权码")
+    
+    try:
+        # 交换token
+        token_data = GmailService.exchange_code_for_token(code)
+        
+        if not token_data:
+            raise HTTPException(status_code=400, detail="获取token失败")
+        
+        # 创建或更新邮箱账户
+        user_email = token_data.get("email")
+        if not user_email:
+            log.error("token_data中缺少email字段")
+            raise HTTPException(status_code=500, detail="无法获取用户邮箱地址")
+        
+        user = crud.get_user_by_email(db, user_email)
+        if not user:
+            from backend.db.schemas import UserCreate
+            user = crud.create_user(db, UserCreate(email=user_email))
+        
+        # 检查账户是否已存在
+        existing_accounts = crud.get_email_accounts_by_user(db, user.id)
+        account = None
+        for acc in existing_accounts:
+            if acc.email == user_email and acc.provider == models.EmailProvider.GMAIL:
+                account = acc
+                break
+        
+        if account:
+            # 更新token
+            crud.update_email_account_token(
+                db,
+                account.id,
+                token_data["access_token"],
+                token_data.get("refresh_token"),
+                token_data.get("expires_at")
+            )
+        else:
+            # 创建新账户
+            from backend.db.schemas import EmailAccountCreate
+            account = crud.create_email_account(
+                db,
+                EmailAccountCreate(
+                    provider=models.EmailProvider.GMAIL,
+                    email=user_email,
+                    access_token=token_data["access_token"],
+                    refresh_token=token_data.get("refresh_token"),
+                    token_expires_at=token_data.get("expires_at")
+                ),
+                user.id
+            )
+        
+        # 触发获取邮件任务
+        from backend.tasks.email_tasks import fetch_emails_from_account
+        fetch_emails_from_account.delay(account.id)
+        
+        # 返回HTML成功页面
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>Gmail连接成功</title>
+            <style>
+                body {{
+                    font-family: Arial, sans-serif;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    height: 100vh;
+                    margin: 0;
+                    background: #f5f5f5;
+                }}
+                .container {{
+                    background: white;
+                    padding: 2rem;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                    text-align: center;
+                }}
+                .success {{
+                    color: #4CAF50;
+                    font-size: 24px;
+                    margin-bottom: 1rem;
+                }}
+                .message {{
+                    color: #666;
+                    margin-bottom: 1rem;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="success">✓ 连接成功！</div>
+                <div class="message">Gmail账户 ({user_email}) 已成功连接</div>
+                <div class="message">窗口将在3秒后自动关闭...</div>
+            </div>
+            <script>
+                // 通知父窗口连接成功
+                if (window.opener) {{
+                    window.opener.postMessage({{ type: 'gmail_connected', success: true }}, '*');
+                }}
+                // 3秒后自动关闭
+                setTimeout(function() {{
+                    window.close();
+                }}, 3000);
+            </script>
+        </body>
+        </html>
+        """
+        return HTMLResponse(content=html_content)
+        
+    except Exception as e:
+        log.error(f"Gmail OAuth回调处理失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"连接失败: {str(e)}")
+
+
 @router.post("/connect")
 async def connect_email(
     request: ConnectEmailRequest,
     db: Session = Depends(get_db)
 ):
-    """连接邮箱账户（OAuth回调）"""
+    """连接邮箱账户（手动连接，使用授权码）"""
     try:
         # 交换token
         if request.provider == models.EmailProvider.GMAIL:
@@ -96,6 +227,32 @@ async def connect_email(
         
     except Exception as e:
         log.error(f"连接邮箱失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/fetch")
+async def fetch_emails(
+    request: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    """手动触发获取邮件"""
+    account_id = request.get("account_id")
+    if not account_id:
+        raise HTTPException(status_code=400, detail="缺少account_id参数")
+    
+    account = crud.get_email_account(db, int(account_id))
+    if not account:
+        raise HTTPException(status_code=404, detail="邮箱账户不存在")
+    
+    if not account.is_active:
+        raise HTTPException(status_code=400, detail="邮箱账户未激活")
+    
+    try:
+        from backend.tasks.email_tasks import fetch_emails_from_account
+        result = fetch_emails_from_account.delay(account_id)
+        return {"success": True, "task_id": result.id, "message": "邮件获取任务已提交"}
+    except Exception as e:
+        log.error(f"触发获取邮件任务失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -283,7 +440,7 @@ async def get_similar_emails(
 @router.post("/{email_id}/draft-with-context")
 async def generate_draft_with_context(
     email_id: int,
-    tone: str = Query("professional"),
+    tone: str = Query("professional", description="语气: professional, friendly, formal"),
     db: Session = Depends(get_db)
 ):
     """使用RAG上下文生成草稿"""
@@ -318,11 +475,15 @@ async def generate_draft_with_context(
 
 @router.post("/agent/process")
 async def agent_process_email(
-    email_id: int,
+    request: dict = Body(...),
     db: Session = Depends(get_db)
 ):
     """使用Agent自动处理邮件"""
-    email = crud.get_email(db, email_id)
+    email_id = request.get("email_id")
+    if not email_id:
+        raise HTTPException(status_code=400, detail="缺少email_id参数")
+    
+    email = crud.get_email(db, int(email_id))
     if not email:
         raise HTTPException(status_code=404, detail="邮件不存在")
     
@@ -339,14 +500,23 @@ async def agent_process_email(
 
 @router.post("/agent/query")
 async def agent_query(
-    query: str = Query(..., description="查询请求"),
+    request: dict = Body(...),
     db: Session = Depends(get_db)
 ):
     """使用Agent处理复杂查询"""
+    query = request.get("query")
+    context = request.get("context")
+    if not query:
+        raise HTTPException(status_code=400, detail="缺少query参数")
+    
     try:
         from backend.services.agent_service import AgentService
         agent_service = AgentService()
-        result = agent_service.handle_complex_request(query)
+        full_query = query
+        if context:
+            context_str = "\n".join([f"{k}: {v}" for k, v in context.items()])
+            full_query = f"{query}\n\n上下文信息:\n{context_str}"
+        result = agent_service.handle_complex_request(full_query)
         
         return result
     except Exception as e:
@@ -356,10 +526,14 @@ async def agent_query(
 
 @router.post("/rag/query")
 async def rag_query(
-    question: str = Query(..., description="问题"),
+    request: dict = Body(...),
     db: Session = Depends(get_db)
 ):
     """基于邮件库的RAG问答"""
+    question = request.get("question")
+    if not question:
+        raise HTTPException(status_code=400, detail="缺少question参数")
+    
     try:
         from backend.services.rag_service import RAGService
         rag_service = RAGService()

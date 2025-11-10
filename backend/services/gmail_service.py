@@ -173,6 +173,9 @@ class GmailService:
                 'raw': raw_message
             }
             
+            if thread_id:
+                send_message['threadId'] = thread_id
+            
             result = self.service.users().messages().send(
                 userId='me',
                 body=send_message
@@ -227,6 +230,26 @@ class GmailService:
                     return self.create_draft(to, subject, body, thread_id)
             return None
     
+    def delete_draft(self, draft_id: str) -> bool:
+        """删除草稿"""
+        if not self.service:
+            if not self.refresh_token():
+                return False
+        
+        try:
+            self.service.users().drafts().delete(
+                userId='me',
+                id=draft_id
+            ).execute()
+            log.info(f"Gmail草稿删除成功: {draft_id}")
+            return True
+        except HttpError as e:
+            log.error(f"删除Gmail草稿失败: {e}")
+            if e.resp.status == 401:
+                if self.refresh_token():
+                    return self.delete_draft(draft_id)
+            return False
+    
     def modify_message(self, message_id: str, add_labels: List[str] = None, remove_labels: List[str] = None) -> bool:
         """修改邮件（添加/删除标签）"""
         if not self.service:
@@ -267,6 +290,8 @@ class GmailService:
     def exchange_code_for_token(code: str) -> Optional[Dict]:
         """使用授权码交换token"""
         try:
+            # 注意：不指定scopes，让Flow使用授权时返回的scope
+            # 这样可以避免scope不匹配的问题（Google可能会自动添加openid等scope）
             flow = Flow.from_client_config(
                 {
                     "web": {
@@ -277,25 +302,44 @@ class GmailService:
                         "redirect_uris": [settings.GMAIL_REDIRECT_URI]
                     }
                 },
-                scopes=[
-                    'https://www.googleapis.com/auth/gmail.readonly',
-                    'https://www.googleapis.com/auth/gmail.send',
-                    'https://www.googleapis.com/auth/gmail.modify',
-                    'https://www.googleapis.com/auth/gmail.compose'
-                ],
                 redirect_uri=settings.GMAIL_REDIRECT_URI
             )
             
             flow.fetch_token(code=code)
             creds = flow.credentials
             
+            # 获取用户信息（email）
+            email = None
+            try:
+                session = flow.authorized_session()
+                userinfo_response = session.get('https://www.googleapis.com/oauth2/v2/userinfo')
+                if userinfo_response.status_code == 200:
+                    userinfo = userinfo_response.json()
+                    email = userinfo.get('email')
+                    log.info(f"从userinfo获取到email: {email}")
+            except Exception as e:
+                log.warning(f"从userinfo获取email失败: {e}")
+            
+            # 如果无法从userinfo获取，尝试使用Gmail API获取profile
+            if not email:
+                try:
+                    from googleapiclient.discovery import build
+                    service = build('gmail', 'v1', credentials=creds)
+                    profile = service.users().getProfile(userId='me').execute()
+                    email = profile.get('emailAddress')
+                    log.info(f"从Gmail profile获取到email: {email}")
+                except Exception as e:
+                    log.warning(f"从Gmail profile获取email失败: {e}")
+            
+            if not email:
+                log.error("无法获取用户email")
+                return None
+            
             return {
                 "access_token": creds.token,
                 "refresh_token": creds.refresh_token,
                 "expires_at": creds.expiry,
-                "email": flow.authorized_session().get(
-                    'https://www.googleapis.com/oauth2/v2/userinfo'
-                ).json().get('email')
+                "email": email
             }
         except Exception as e:
             log.error(f"Gmail token交换失败: {e}")
