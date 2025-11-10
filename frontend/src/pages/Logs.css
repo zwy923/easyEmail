@@ -1,0 +1,29 @@
+.logs-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2rem;
+}
+
+.logs-header h1 {
+  color: #2c3e50;
+}
+
+.logs-filters {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+}
+
+.log-error {
+  background-color: #fee;
+}
+
+.log-warning {
+  background-color: #fff8e1;
+}
+
+.log-info {
+  background-color: #e3f2fd;
+}
+

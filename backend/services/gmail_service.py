@@ -1,0 +1,303 @@
+"""Gmail API服务"""
+from typing import List, Dict, Optional
+from datetime import datetime
+from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
+from google_auth_oauthlib.flow import Flow
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+import base64
+import email
+
+from backend.config import settings
+from backend.utils.logging_config import log
+from backend.utils.mail_parser import parse_email_message
+from backend.db.models import EmailAccount
+
+
+class GmailService:
+    """Gmail服务类"""
+    
+    def __init__(self, account: EmailAccount):
+        self.account = account
+        self.service = None
+        self._build_service()
+    
+    def _build_service(self):
+        """构建Gmail API服务"""
+        try:
+            creds = self._get_credentials()
+            if creds and creds.valid:
+                self.service = build('gmail', 'v1', credentials=creds)
+            else:
+                log.error(f"Gmail账户 {self.account.email} 的凭证无效")
+        except Exception as e:
+            log.error(f"构建Gmail服务失败: {e}")
+    
+    def _get_credentials(self) -> Optional[Credentials]:
+        """获取并刷新凭证"""
+        try:
+            # 从数据库获取token（这里假设已解密）
+            creds = Credentials(
+                token=self.account.access_token,
+                refresh_token=self.account.refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=settings.GMAIL_CLIENT_ID,
+                client_secret=settings.GMAIL_CLIENT_SECRET
+            )
+            
+            # 如果token过期，刷新
+            if creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                # 更新数据库中的token
+                # 这里应该在调用方更新数据库
+                return creds
+            
+            return creds
+        except Exception as e:
+            log.error(f"获取Gmail凭证失败: {e}")
+            return None
+    
+    def refresh_token(self) -> bool:
+        """刷新token并更新数据库"""
+        try:
+            creds = self._get_credentials()
+            if creds:
+                # 更新数据库
+                from backend.db.database import SessionLocal
+                db = SessionLocal()
+                try:
+                    self.account.access_token = creds.token
+                    if creds.refresh_token:
+                        self.account.refresh_token = creds.refresh_token
+                    if creds.expiry:
+                        self.account.token_expires_at = creds.expiry
+                    db.commit()
+                    # 重新构建服务
+                    self._build_service()
+                    return True
+                finally:
+                    db.close()
+            return False
+        except Exception as e:
+            log.error(f"刷新Gmail token失败: {e}")
+            return False
+    
+    def get_messages(self, max_results: int = 50, query: str = "") -> List[Dict]:
+        """获取邮件列表"""
+        if not self.service:
+            if not self.refresh_token():
+                return []
+        
+        try:
+            results = self.service.users().messages().list(
+                userId='me',
+                maxResults=max_results,
+                q=query
+            ).execute()
+            
+            messages = results.get('messages', [])
+            return messages
+        except HttpError as e:
+            log.error(f"获取Gmail邮件列表失败: {e}")
+            if e.resp.status == 401:
+                # Token过期，尝试刷新
+                if self.refresh_token():
+                    return self.get_messages(max_results, query)
+            return []
+    
+    def get_message(self, message_id: str) -> Optional[Dict]:
+        """获取邮件详情"""
+        if not self.service:
+            if not self.refresh_token():
+                return None
+        
+        try:
+            message = self.service.users().messages().get(
+                userId='me',
+                id=message_id,
+                format='raw'
+            ).execute()
+            
+            # 解析邮件
+            raw_data = base64.urlsafe_b64decode(message['raw'])
+            parsed = parse_email_message(raw_data)
+            
+            # 获取标签
+            labels = message.get('labelIds', [])
+            
+            # 获取线程ID
+            thread_id = message.get('threadId', '')
+            
+            # 获取时间戳
+            internal_date = message.get('internalDate')
+            received_at = None
+            if internal_date:
+                received_at = datetime.fromtimestamp(int(internal_date) / 1000)
+            
+            return {
+                **parsed,
+                "provider_message_id": message_id,
+                "thread_id": thread_id,
+                "labels": labels,
+                "received_at": received_at or parsed.get("received_at")
+            }
+        except HttpError as e:
+            log.error(f"获取Gmail邮件详情失败: {e}")
+            if e.resp.status == 401:
+                if self.refresh_token():
+                    return self.get_message(message_id)
+            return None
+    
+    def send_message(self, to: str, subject: str, body: str, is_html: bool = False) -> Optional[str]:
+        """发送邮件"""
+        if not self.service:
+            if not self.refresh_token():
+                return None
+        
+        try:
+            # 构建邮件消息
+            message = email.message.EmailMessage()
+            message['To'] = to
+            message['Subject'] = subject
+            
+            if is_html:
+                message.set_content(body, subtype='html')
+            else:
+                message.set_content(body)
+            
+            # 编码为base64url
+            raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+            
+            send_message = {
+                'raw': raw_message
+            }
+            
+            result = self.service.users().messages().send(
+                userId='me',
+                body=send_message
+            ).execute()
+            
+            log.info(f"Gmail邮件发送成功: {result.get('id')}")
+            return result.get('id')
+        except HttpError as e:
+            log.error(f"发送Gmail邮件失败: {e}")
+            if e.resp.status == 401:
+                if self.refresh_token():
+                    return self.send_message(to, subject, body, is_html)
+            return None
+    
+    def create_draft(self, to: str, subject: str, body: str, thread_id: Optional[str] = None) -> Optional[str]:
+        """创建草稿"""
+        if not self.service:
+            if not self.refresh_token():
+                return None
+        
+        try:
+            # 构建邮件消息
+            message = email.message.EmailMessage()
+            message['To'] = to
+            message['Subject'] = subject
+            message.set_content(body)
+            
+            # 编码为base64url
+            raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+            
+            draft = {
+                'message': {
+                    'raw': raw_message
+                }
+            }
+            
+            if thread_id:
+                draft['message']['threadId'] = thread_id
+            
+            result = self.service.users().drafts().create(
+                userId='me',
+                body=draft
+            ).execute()
+            
+            draft_id = result.get('id')
+            log.info(f"Gmail草稿创建成功: {draft_id}")
+            return draft_id
+        except HttpError as e:
+            log.error(f"创建Gmail草稿失败: {e}")
+            if e.resp.status == 401:
+                if self.refresh_token():
+                    return self.create_draft(to, subject, body, thread_id)
+            return None
+    
+    def modify_message(self, message_id: str, add_labels: List[str] = None, remove_labels: List[str] = None) -> bool:
+        """修改邮件（添加/删除标签）"""
+        if not self.service:
+            if not self.refresh_token():
+                return False
+        
+        try:
+            modify_request = {}
+            if add_labels:
+                modify_request['addLabelIds'] = add_labels
+            if remove_labels:
+                modify_request['removeLabelIds'] = remove_labels
+            
+            if modify_request:
+                self.service.users().messages().modify(
+                    userId='me',
+                    id=message_id,
+                    body=modify_request
+                ).execute()
+                return True
+            return False
+        except HttpError as e:
+            log.error(f"修改Gmail邮件失败: {e}")
+            if e.resp.status == 401:
+                if self.refresh_token():
+                    return self.modify_message(message_id, add_labels, remove_labels)
+            return False
+    
+    def mark_as_read(self, message_id: str) -> bool:
+        """标记为已读"""
+        return self.modify_message(message_id, remove_labels=['UNREAD'])
+    
+    def mark_as_important(self, message_id: str) -> bool:
+        """标记为重要"""
+        return self.modify_message(message_id, add_labels=['IMPORTANT'])
+    
+    @staticmethod
+    def exchange_code_for_token(code: str) -> Optional[Dict]:
+        """使用授权码交换token"""
+        try:
+            flow = Flow.from_client_config(
+                {
+                    "web": {
+                        "client_id": settings.GMAIL_CLIENT_ID,
+                        "client_secret": settings.GMAIL_CLIENT_SECRET,
+                        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "redirect_uris": [settings.GMAIL_REDIRECT_URI]
+                    }
+                },
+                scopes=[
+                    'https://www.googleapis.com/auth/gmail.readonly',
+                    'https://www.googleapis.com/auth/gmail.send',
+                    'https://www.googleapis.com/auth/gmail.modify',
+                    'https://www.googleapis.com/auth/gmail.compose'
+                ],
+                redirect_uri=settings.GMAIL_REDIRECT_URI
+            )
+            
+            flow.fetch_token(code=code)
+            creds = flow.credentials
+            
+            return {
+                "access_token": creds.token,
+                "refresh_token": creds.refresh_token,
+                "expires_at": creds.expiry,
+                "email": flow.authorized_session().get(
+                    'https://www.googleapis.com/oauth2/v2/userinfo'
+                ).json().get('email')
+            }
+        except Exception as e:
+            log.error(f"Gmail token交换失败: {e}")
+            return None
+
