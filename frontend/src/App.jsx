@@ -1,9 +1,7 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { BrowserRouter as Router, Routes, Route, Link, useLocation } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
-import Rules from './pages/Rules'
 import Inbox from './pages/Inbox'
-import Logs from './pages/Logs'
 import Drafts from './pages/Drafts'
 import './App.css'
 
@@ -15,10 +13,8 @@ function App() {
         <main className="main-content">
           <Routes>
             <Route path="/" element={<Dashboard />} />
-            <Route path="/rules" element={<Rules />} />
             <Route path="/inbox" element={<Inbox />} />
             <Route path="/drafts" element={<Drafts />} />
-            <Route path="/logs" element={<Logs />} />
           </Routes>
         </main>
       </div>
@@ -28,31 +24,48 @@ function App() {
 
 function NavBar() {
   const location = useLocation()
-  
+  const [menuOpen, setMenuOpen] = useState(false)
+
   const navItems = [
     { path: '/', label: '总览' },
     { path: '/inbox', label: '收件箱' },
-    { path: '/drafts', label: '草稿' },
-    { path: '/rules', label: '规则' },
-    { path: '/logs', label: '日志' },
+    { path: '/drafts', label: '草稿' }
   ]
-  
+
   return (
-    <nav className="navbar">
-      <div className="navbar-brand">
-        <h1>AI邮件编排系统</h1>
+    <nav className={`navbar ${menuOpen ? 'navbar-open' : ''}`}>
+      <div className="navbar-inner">
+        <div className="navbar-brand">
+          <div className="brand-icon" aria-hidden="true">📨</div>
+          <div className="brand-copy">
+            <h1>EZmail重新设计现代和美观的排版</h1>
+            <p>智能化邮件运营工作台</p>
+          </div>
+        </div>
+        <button
+          className="navbar-toggle"
+          aria-label="切换导航"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((open) => !open)}
+        >
+          <span />
+          <span />
+          <span />
+        </button>
+        <div className="navbar-links">
+          {navItems.map((item) => (
+            <Link
+              key={item.path}
+              to={item.path}
+              className={`nav-link ${location.pathname === item.path ? 'active' : ''}`}
+              onClick={() => setMenuOpen(false)}
+            >
+              {item.label}
+            </Link>
+          ))}
+        </div>
       </div>
-      <div className="navbar-links">
-        {navItems.map((item) => (
-          <Link
-            key={item.path}
-            to={item.path}
-            className={location.pathname === item.path ? 'active' : ''}
-          >
-            {item.label}
-          </Link>
-        ))}
-      </div>
+      {menuOpen && <div className="navbar-overlay" onClick={() => setMenuOpen(false)} />}
     </nav>
   )
 }

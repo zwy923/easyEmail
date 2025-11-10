@@ -7,8 +7,8 @@ from contextlib import asynccontextmanager
 from backend.config import settings
 from backend.utils.logging_config import log
 from backend.db.models import Base
-from backend.db.database import engine, SessionLocal
-from backend.api import routes_email, routes_rules
+from backend.db.database import engine
+from backend.api import routes_email
 
 
 @asynccontextmanager
@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
 
 # 创建FastAPI应用
 app = FastAPI(
-    title="AI邮件编排系统",
+    title="EZmail重新设计现代和美观的排版",
     description="统一管理多个邮箱，自动分类、生成草稿回复",
     version="1.0.0",
     lifespan=lifespan
@@ -53,14 +53,6 @@ app.add_middleware(
 
 # 注册路由
 app.include_router(routes_email.router, prefix="/api/email", tags=["邮件"])
-app.include_router(routes_rules.router, prefix="/api/rules", tags=["规则"])
-
-# 注册日志路由
-try:
-    from backend.api import routes_logs
-    app.include_router(routes_logs.router, prefix="/api/logs", tags=["日志"])
-except ImportError:
-    log.warning("日志路由模块未找到，跳过注册")
 
 # 注册草稿路由
 try:
@@ -73,7 +65,7 @@ except ImportError:
 @app.get("/")
 async def root():
     """根路径"""
-    return {"message": "AI邮件编排系统 API", "version": "1.0.0"}
+    return {"message": "EZmail重新设计现代和美观的排版 API", "version": "1.0.0"}
 
 
 @app.get("/health")
