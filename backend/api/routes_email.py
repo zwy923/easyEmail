@@ -404,6 +404,72 @@ async def mark_as_important(email_id: int, db: Session = Depends(get_db)):
     return {"success": True}
 
 
+@router.delete("/{email_id}")
+async def delete_email(email_id: int, db: Session = Depends(get_db)):
+    """删除单封邮件"""
+    email = crud.get_email(db, email_id)
+    if not email:
+        raise HTTPException(status_code=404, detail="邮件不存在")
+    
+    try:
+        # 使用Celery任务异步删除（带延迟以避免限流）
+        from backend.tasks.email_tasks import delete_email as delete_email_task
+        result = delete_email_task.delay(email_id)
+        
+        return {
+            "success": True,
+            "message": "删除任务已提交",
+            "task_id": result.id
+        }
+    except Exception as e:
+        log.error(f"提交删除任务失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/batch-delete")
+async def batch_delete_emails(
+    request: dict = Body(...),
+    db: Session = Depends(get_db)
+):
+    """批量删除邮件
+    
+    Request body:
+        {
+            "email_ids": [1, 2, 3, ...]
+        }
+    """
+    email_ids = request.get("email_ids", [])
+    if not email_ids:
+        raise HTTPException(status_code=400, detail="缺少email_ids参数")
+    
+    if not isinstance(email_ids, list):
+        raise HTTPException(status_code=400, detail="email_ids必须是列表")
+    
+    if len(email_ids) == 0:
+        raise HTTPException(status_code=400, detail="email_ids不能为空")
+    
+    # 验证邮件是否存在
+    for email_id in email_ids:
+        email = crud.get_email(db, email_id)
+        if not email:
+            raise HTTPException(status_code=404, detail=f"邮件 {email_id} 不存在")
+    
+    try:
+        # 使用Celery任务批量删除（带延迟以避免限流）
+        from backend.tasks.email_tasks import delete_emails_batch
+        result = delete_emails_batch.delay(email_ids)
+        
+        return {
+            "success": True,
+            "message": f"批量删除任务已提交，共 {len(email_ids)} 封邮件",
+            "task_id": result.id,
+            "total": len(email_ids)
+        }
+    except Exception as e:
+        log.error(f"提交批量删除任务失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/{email_id}/similar")
 async def get_similar_emails(
     email_id: int,

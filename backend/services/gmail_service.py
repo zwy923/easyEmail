@@ -83,27 +83,83 @@ class GmailService:
             log.error(f"刷新Gmail token失败: {e}")
             return False
     
-    def get_messages(self, max_results: int = 50, query: str = "") -> List[Dict]:
-        """获取邮件列表"""
+    def get_messages(self, max_results: int = None, query: str = "", fetch_all: bool = False) -> List[Dict]:
+        """获取邮件列表
+        
+        Args:
+            max_results: 最大返回数量（如果为None且fetch_all=False，默认50）
+            query: 查询条件
+            fetch_all: 是否获取所有邮件（忽略max_results限制）
+        
+        Returns:
+            邮件列表
+        """
         if not self.service:
             if not self.refresh_token():
                 return []
         
         try:
-            results = self.service.users().messages().list(
-                userId='me',
-                maxResults=max_results,
-                q=query
-            ).execute()
+            all_messages = []
+            page_token = None
+            batch_size = 500  # Gmail API单次请求最大500条
             
-            messages = results.get('messages', [])
-            return messages
+            # 如果fetch_all为True，则获取所有邮件
+            # 如果max_results为None，默认使用50（向后兼容）
+            if max_results is None and not fetch_all:
+                max_results = 50
+            
+            while True:
+                # 计算本次请求的数量
+                if fetch_all:
+                    # 获取所有邮件时，每次请求500条
+                    current_max = batch_size
+                elif max_results:
+                    # 计算还需要获取多少条
+                    remaining = max_results - len(all_messages)
+                    if remaining <= 0:
+                        break
+                    current_max = min(remaining, batch_size)
+                else:
+                    break
+                
+                # 构建请求参数
+                request_params = {
+                    'userId': 'me',
+                    'maxResults': current_max,
+                }
+                if query:
+                    request_params['q'] = query
+                if page_token:
+                    request_params['pageToken'] = page_token
+                
+                # 执行请求
+                results = self.service.users().messages().list(**request_params).execute()
+                
+                messages = results.get('messages', [])
+                all_messages.extend(messages)
+                
+                # 检查是否有下一页
+                page_token = results.get('nextPageToken')
+                if not page_token:
+                    # 没有更多页面了
+                    break
+                
+                # 如果设置了max_results且已获取足够数量，停止
+                if max_results and len(all_messages) >= max_results:
+                    all_messages = all_messages[:max_results]
+                    break
+                
+                log.debug(f"已获取 {len(all_messages)} 封邮件，继续获取...")
+            
+            log.info(f"总共获取到 {len(all_messages)} 封邮件")
+            return all_messages
+            
         except HttpError as e:
             log.error(f"获取Gmail邮件列表失败: {e}")
             if e.resp.status == 401:
                 # Token过期，尝试刷新
                 if self.refresh_token():
-                    return self.get_messages(max_results, query)
+                    return self.get_messages(max_results, query, fetch_all)
             return []
     
     def get_message(self, message_id: str) -> Optional[Dict]:
@@ -285,6 +341,38 @@ class GmailService:
     def mark_as_important(self, message_id: str) -> bool:
         """标记为重要"""
         return self.modify_message(message_id, add_labels=['IMPORTANT'])
+    
+    def delete_message(self, message_id: str) -> bool:
+        """删除邮件
+        
+        Args:
+            message_id: Gmail消息ID
+            
+        Returns:
+            是否成功
+        """
+        if not self.service:
+            if not self.refresh_token():
+                return False
+        
+        try:
+            self.service.users().messages().delete(
+                userId='me',
+                id=message_id
+            ).execute()
+            log.info(f"Gmail邮件删除成功: {message_id}")
+            return True
+        except HttpError as e:
+            log.error(f"删除Gmail邮件失败: {e}")
+            if e.resp.status == 401:
+                # Token过期，尝试刷新
+                if self.refresh_token():
+                    return self.delete_message(message_id)
+            elif e.resp.status == 429:
+                # 限流错误
+                log.warning(f"Gmail API限流，邮件 {message_id} 删除失败")
+                raise Exception("Gmail API限流，请稍后重试")
+            return False
     
     @staticmethod
     def exchange_code_for_token(code: str) -> Optional[Dict]:

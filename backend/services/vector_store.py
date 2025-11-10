@@ -1,6 +1,13 @@
 """向量存储服务：使用PGVector存储和检索邮件向量"""
 from typing import List, Optional, Dict
-from langchain.vectorstores import PGVector
+try:
+    from langchain_community.vectorstores import PGVector
+except ImportError:
+    # 兼容旧版本
+    try:
+        from langchain.vectorstores import PGVector
+    except ImportError:
+        from langchain_community.vectorstores.pgvector import PGVector
 from langchain_core.documents import Document
 from sqlalchemy.orm import Session
 
@@ -183,6 +190,29 @@ class VectorStoreService:
         
         # 返回指定数量
         return filtered_results[:k] if k else filtered_results[:settings.RAG_TOP_K]
+    
+    def update_email(self, email: Email) -> bool:
+        """更新邮件向量（先删除再添加）
+        
+        Args:
+            email: 邮件对象
+            
+        Returns:
+            是否成功
+        """
+        if not self.vector_store:
+            return False
+        
+        try:
+            # 先删除旧的向量
+            self.delete_email(email.id)
+            
+            # 重新添加（使用相同的ID会覆盖）
+            return self.add_email(email)
+            
+        except Exception as e:
+            log.error(f"更新邮件向量失败: {e}", exc_info=True)
+            return False
     
     def delete_email(self, email_id: int) -> bool:
         """从向量存储删除邮件

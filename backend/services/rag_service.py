@@ -144,6 +144,11 @@ class RAGService:
                 context_text = "\n".join(context_parts)
             
             # 构建提示词
+            # 先构建上下文部分（避免在f-string表达式中使用反斜杠）
+            context_section = ""
+            if context_text:
+                context_section = f"历史上下文：\n{context_text}\n"
+            
             prompt = f"""请根据以下邮件和上下文信息生成回复：
 
 原邮件：
@@ -151,8 +156,7 @@ class RAGService:
 主题: {email.subject}
 正文: {email.body_text or email.body_html or '无正文'}
 
-{f'历史上下文：\n{context_text}\n' if context_text else ''}
-
+{context_section}
 要求：
 - 语气: {tone}
 - 回复应该针对原邮件的内容

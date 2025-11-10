@@ -130,14 +130,41 @@ def get_emails(
 
 
 def update_email(db: Session, email_id: int, **kwargs) -> Optional[models.Email]:
-    """更新邮件"""
+    """更新邮件
+    
+    注意：如果更新了影响向量内容的字段（subject, body_text, body_html, sender等），
+    会自动更新向量存储
+    """
     email = get_email(db, email_id)
     if email:
+        # 记录哪些字段被更新了
+        updated_fields = set(kwargs.keys())
+        
+        # 定义影响向量内容的字段
+        vector_content_fields = {
+            'subject', 'body_text', 'body_html', 
+            'sender', 'sender_email'
+        }
+        
+        # 检查是否有影响向量的字段被更新
+        needs_vector_update = bool(updated_fields & vector_content_fields)
+        
         for key, value in kwargs.items():
             if hasattr(email, key):
                 setattr(email, key, value)
         db.commit()
         db.refresh(email)
+        
+        # 如果更新了影响向量的字段，更新向量存储
+        if needs_vector_update:
+            try:
+                from backend.services.vector_store import VectorStoreService
+                vector_store = VectorStoreService()
+                vector_store.update_email(email)
+                log.debug(f"邮件 {email_id} 的向量已更新（字段: {updated_fields & vector_content_fields}）")
+            except Exception as e:
+                log.warning(f"更新邮件 {email_id} 向量失败: {e}")
+        
     return email
 
 

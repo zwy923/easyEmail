@@ -13,11 +13,13 @@ function Inbox() {
     sender: ''
   })
   const [selectedEmail, setSelectedEmail] = useState(null)
+  const [selectedEmailIds, setSelectedEmailIds] = useState(new Set())
   const [similarEmails, setSimilarEmails] = useState([])
   const [drafts, setDrafts] = useState([])
   const [loadingSimilar, setLoadingSimilar] = useState(false)
   const [ragQuery, setRagQuery] = useState('')
   const [ragResult, setRagResult] = useState(null)
+  const [deleting, setDeleting] = useState(false)
 
   useEffect(() => {
     loadEmails()
@@ -130,6 +132,84 @@ function Inbox() {
     }
   }
 
+  const handleSelectEmail = (emailId, checked) => {
+    const newSelected = new Set(selectedEmailIds)
+    if (checked) {
+      newSelected.add(emailId)
+    } else {
+      newSelected.delete(emailId)
+    }
+    setSelectedEmailIds(newSelected)
+  }
+
+  const handleSelectAll = (checked) => {
+    if (checked) {
+      setSelectedEmailIds(new Set(emails.map(e => e.id)))
+    } else {
+      setSelectedEmailIds(new Set())
+    }
+  }
+
+  const handleDeleteEmail = async (emailId) => {
+    if (!window.confirm('确定要删除这封邮件吗？')) {
+      return
+    }
+    
+    try {
+      setDeleting(true)
+      await axiosInstance.delete(`/email/${emailId}`)
+      alert('删除任务已提交，邮件将在后台删除')
+      // 从列表中移除
+      setEmails(emails.filter(e => e.id !== emailId))
+      setSelectedEmailIds(prev => {
+        const newSet = new Set(prev)
+        newSet.delete(emailId)
+        return newSet
+      })
+      // 如果删除的是当前查看的邮件，关闭详情
+      if (selectedEmail && selectedEmail.id === emailId) {
+        setSelectedEmail(null)
+      }
+    } catch (error) {
+      console.error('删除邮件失败:', error)
+      alert('删除失败: ' + (error.detail || '未知错误'))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  const handleBatchDelete = async () => {
+    if (selectedEmailIds.size === 0) {
+      alert('请先选择要删除的邮件')
+      return
+    }
+    
+    if (!window.confirm(`确定要删除选中的 ${selectedEmailIds.size} 封邮件吗？`)) {
+      return
+    }
+    
+    try {
+      setDeleting(true)
+      const emailIds = Array.from(selectedEmailIds)
+      await axiosInstance.post('/email/batch-delete', {
+        email_ids: emailIds
+      })
+      alert(`批量删除任务已提交，共 ${emailIds.length} 封邮件将在后台删除`)
+      // 从列表中移除
+      setEmails(emails.filter(e => !selectedEmailIds.has(e.id)))
+      setSelectedEmailIds(new Set())
+      // 如果删除的邮件中包含当前查看的邮件，关闭详情
+      if (selectedEmail && selectedEmailIds.has(selectedEmail.id)) {
+        setSelectedEmail(null)
+      }
+    } catch (error) {
+      console.error('批量删除失败:', error)
+      alert('批量删除失败: ' + (error.detail || '未知错误'))
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   const getCategoryBadgeClass = (category) => {
     if (!category) return 'badge-normal'
     return `badge-${category}`
@@ -190,13 +270,34 @@ function Inbox() {
       </div>
 
       <div className="card">
-        <h2>邮件列表</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <h2>邮件列表</h2>
+          {selectedEmailIds.size > 0 && (
+            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+              <span>已选择 {selectedEmailIds.size} 封邮件</span>
+              <button 
+                className="button button-danger" 
+                onClick={handleBatchDelete}
+                disabled={deleting}
+              >
+                {deleting ? '删除中...' : `批量删除 (${selectedEmailIds.size})`}
+              </button>
+            </div>
+          )}
+        </div>
         {emails.length === 0 ? (
           <p>暂无邮件</p>
         ) : (
           <table className="table">
             <thead>
               <tr>
+                <th style={{ width: '40px' }}>
+                  <input
+                    type="checkbox"
+                    checked={selectedEmailIds.size === emails.length && emails.length > 0}
+                    onChange={(e) => handleSelectAll(e.target.checked)}
+                  />
+                </th>
                 <th>发件人</th>
                 <th>主题</th>
                 <th>类别</th>
@@ -212,6 +313,16 @@ function Inbox() {
                   onClick={() => loadEmailDetails(email.id)}
                   style={{ cursor: 'pointer' }}
                 >
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedEmailIds.has(email.id)}
+                      onChange={(e) => {
+                        e.stopPropagation()
+                        handleSelectEmail(email.id, e.target.checked)
+                      }}
+                    />
+                  </td>
                   <td>{email.sender || email.sender_email}</td>
                   <td>{email.subject || '(无主题)'}</td>
                   <td>
@@ -243,6 +354,13 @@ function Inbox() {
                         onClick={() => handleGenerateDraft(email.id)}
                       >
                         生成草稿
+                      </button>
+                      <button
+                        className="button button-danger"
+                        onClick={() => handleDeleteEmail(email.id)}
+                        disabled={deleting}
+                      >
+                        删除
                       </button>
                     </div>
                   </td>
