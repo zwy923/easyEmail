@@ -67,6 +67,13 @@ def fetch_emails_from_account(self, account_id: int):
             }
         )
         
+        try:
+            from backend.services.vector_store import VectorStoreService
+            vector_store = VectorStoreService()
+        except Exception as e:
+            vector_store = None
+            log.warning(f"初始化向量存储服务失败: {e}", exc_info=True)
+
         for idx, msg in enumerate(messages, 1):
             # 每处理10封邮件更新一次进度（更频繁的更新）
             if idx % 10 == 0 or idx == total_messages:
@@ -93,8 +100,8 @@ def fetch_emails_from_account(self, account_id: int):
                 # 同步已存在邮件的状态（从Gmail获取最新状态）
                 # 注意：使用get_message_status只获取metadata，不获取完整邮件内容，以提高性能
                 try:
-                    # 首先检查邮件是否还存在（可能已在Gmail中删除）
-                    exists = service.check_message_exists(message_id)
+                    # 首先检查邮件是否还存在并获取最新状态
+                    exists, gmail_status = service.get_message_state(message_id)
                     if not exists:
                         # 邮件在Gmail中已删除，标记为已删除
                         from backend.db.models import EmailStatus
@@ -103,9 +110,8 @@ def fetch_emails_from_account(self, account_id: int):
                             log.info(f"邮件 {existing.id} (message_id: {message_id}) 在Gmail中已删除，已标记为DELETED")
                         skipped_count += 1
                         continue
-                    
+
                     # 邮件存在，同步状态
-                    gmail_status = service.get_message_status(message_id)
                     if gmail_status:
                         # 将Gmail状态转换为数据库状态
                         from backend.db.models import EmailStatus
@@ -171,14 +177,13 @@ def fetch_emails_from_account(self, account_id: int):
             new_count += 1
             
             # 添加到向量存储
-            try:
-                from backend.services.vector_store import VectorStoreService
-                vector_store = VectorStoreService()
-                success = vector_store.add_email(email)
-                if not success:
-                    log.warning(f"添加邮件 {email.id} 到向量存储失败（返回False）")
-            except Exception as e:
-                log.warning(f"添加邮件 {email.id} 到向量存储失败: {e}", exc_info=True)
+            if vector_store:
+                try:
+                    success = vector_store.add_email(email)
+                    if not success:
+                        log.warning(f"添加邮件 {email.id} 到向量存储失败（返回False）")
+                except Exception as e:
+                    log.warning(f"添加邮件 {email.id} 到向量存储失败: {e}", exc_info=True)
             
             # 不再自动分类，只有用户手动点击分类按钮时才会分类
         
