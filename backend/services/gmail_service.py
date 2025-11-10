@@ -290,8 +290,16 @@ class GmailService:
     def exchange_code_for_token(code: str) -> Optional[Dict]:
         """使用授权码交换token"""
         try:
-            # 注意：不指定scopes，让Flow使用授权时返回的scope
-            # 这样可以避免scope不匹配的问题（Google可能会自动添加openid等scope）
+            # 使用与授权URL生成时相同的scopes
+            scopes = [
+                'openid',  # Google OAuth 会自动添加，显式包含以避免scope不匹配
+                'https://www.googleapis.com/auth/gmail.readonly',
+                'https://www.googleapis.com/auth/gmail.send',
+                'https://www.googleapis.com/auth/gmail.modify',
+                'https://www.googleapis.com/auth/gmail.compose',
+                'https://www.googleapis.com/auth/userinfo.email'  # 获取用户email
+            ]
+            
             flow = Flow.from_client_config(
                 {
                     "web": {
@@ -302,6 +310,7 @@ class GmailService:
                         "redirect_uris": [settings.GMAIL_REDIRECT_URI]
                     }
                 },
+                scopes=scopes,
                 redirect_uri=settings.GMAIL_REDIRECT_URI
             )
             
