@@ -38,7 +38,7 @@ function NavBar() {
         <div className="navbar-brand">
           <div className="brand-icon" aria-hidden="true">📨</div>
           <div className="brand-copy">
-            <h1>EZmail重新设计现代和美观的排版</h1>
+            <h1>EZmail</h1>
             <p>智能化邮件运营工作台</p>
           </div>
         </div>

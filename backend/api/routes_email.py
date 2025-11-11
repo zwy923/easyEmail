@@ -668,13 +668,17 @@ async def delete_email(email_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="邮件不存在")
     
     try:
+        # 立即在数据库中将邮件标记为已删除（改善前端立即反馈/避免被检索到）
+        # 实际删除操作仍由异步任务执行（从Gmail、向量存储和数据库彻底清理）
+        crud.update_email(db, email_id, status=models.EmailStatus.DELETED)
+
         # 使用Celery任务异步删除（带延迟以避免限流）
         from backend.tasks.email_tasks import delete_email as delete_email_task
         result = delete_email_task.delay(email_id)
-        
+
         return {
             "success": True,
-            "message": "删除任务已提交",
+            "message": "删除任务已提交，邮件已标记为已删除",
             "task_id": result.id
         }
     except Exception as e:
@@ -711,13 +715,21 @@ async def batch_delete_emails(
             raise HTTPException(status_code=404, detail=f"邮件 {email_id} 不存在")
     
     try:
+        # 立即将这些邮件在数据库中标记为已删除，提升前端体验并避免被检索到
+        for eid in email_ids:
+            try:
+                crud.update_email(db, eid, status=models.EmailStatus.DELETED)
+            except Exception:
+                # 不因为单个标记失败阻止任务提交，记录即可
+                log.warning(f"将邮件 {eid} 标记为已删除时失败")
+
         # 使用Celery任务批量删除（带延迟以避免限流）
         from backend.tasks.email_tasks import delete_emails_batch
         result = delete_emails_batch.delay(email_ids)
-        
+
         return {
             "success": True,
-            "message": f"批量删除任务已提交，共 {len(email_ids)} 封邮件",
+            "message": f"批量删除任务已提交，共 {len(email_ids)} 封邮件，已在数据库中标记为已删除",
             "task_id": result.id,
             "total": len(email_ids)
         }
