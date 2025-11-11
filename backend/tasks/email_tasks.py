@@ -352,6 +352,13 @@ def sync_email_status(self, account_id: int):
                         crud.update_email(db, email.id, status=EmailStatus.DELETED)
                         deleted_count += 1
                         log.info(f"邮件 {email.id} 在Gmail中已删除，已标记为DELETED")
+                    # 同步检测到Gmail中缺失的邮件，提交后台删除任务以清理向量存储与数据库记录
+                    try:
+                        # 提交删除任务，延迟1秒以避免短时间内大量并发
+                        delete_email.apply_async(args=[email.id], countdown=1)
+                        log.info(f"已提交删除任务以清理邮件 {email.id}（Gmail中不存在）")
+                    except Exception as e:
+                        log.warning(f"为邮件 {email.id} 提交删除任务失败: {e}")
                     synced_count += 1
                     continue
                 
@@ -461,7 +468,18 @@ def delete_email(self, email_id: int):
                 time.sleep(0.1)
                 success = service.delete_message(email.provider_message_id)
                 if not success:
-                    return {"success": False, "message": "Gmail删除失败"}
+                    # 如果删除返回 False，可能是因为邮件在 Gmail 中已不存在（404）或其他非权限/限流错误
+                    try:
+                        exists = service.check_message_exists(email.provider_message_id)
+                    except Exception as e:
+                        log.warning(f"检查Gmail消息存在性失败: {e}")
+                        return {"success": False, "message": "Gmail删除失败"}
+
+                    if not exists:
+                        # 邮件在Gmail中已经不存在，继续进行向量存储与数据库清理
+                        log.info(f"Gmail消息 {email.provider_message_id} 不存在，继续本地清理")
+                    else:
+                        return {"success": False, "message": "Gmail删除失败"}
             except Exception as e:
                 error_msg = str(e)
                 log.error(f"删除Gmail邮件失败: {e}")
